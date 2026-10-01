@@ -1,0 +1,5 @@
+discord.py[voice]>=2.7,<3
+yt-dlp[default]>=2026.8.19
+deno>=2.0
+aiosqlite>=0.20,<1
+tzdata>=2024.1
