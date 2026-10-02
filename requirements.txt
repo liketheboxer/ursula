@@ -3,3 +3,4 @@ yt-dlp[default]>=2026.8.19
 deno>=2.0
 aiosqlite>=0.20,<1
 tzdata>=2024.1
+matrix-nio[e2e]>=0.26,<0.27

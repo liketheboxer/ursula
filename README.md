@@ -54,7 +54,8 @@ Inside the code the PlunderBot names stay (a gathering is a `Voyage`, a custom a
 - **Matrix to Discord:** a webhook in the channel posts under the Matrix member's display name, with every mention switched off (nobody on Matrix can ping @everyone or a role). Pictures and files up to 8 MB are carried. Replies show a link to the message they answer; edits and redactions follow.
 - Only new messages are carried: linking (or changing the room) starts from now, and after downtime messages older than 6 hours are left. Ursula ignores her own Matrix messages and her webhook's Discord ones, so nothing loops. Which copy is which is kept for 30 days.
 - A Matrix member's message deleted on Discord is redacted on Matrix only if Ursula is a moderator in the room; otherwise it stays there.
-- Not carried (yet): reactions, threads, encrypted rooms (the room must be unencrypted), and Discord embeds (the link inside them is carried).
+- **Encrypted rooms** work: Ursula has her own Matrix device and keeps its keys in `/data/matrix` (keep the data volume across refits; losing it means a new Matrix login and token). Element shows her device as unverified; that's expected, and messages still reach her. She can't read anything sent before her device existed. A message whose key is late waits up to 10 minutes before it's given up on.
+- Not carried (yet): reactions, threads, and Discord embeds (the link inside them is carried).
 - If Matrix refuses Ursula's token, the Ansible stops until a refit and `/pdc settings` says why. If the homeserver can't be reached, it keeps trying, waiting longer each time (up to 5 minutes).
 
 ### How Customs work
@@ -125,7 +126,7 @@ cp .env.example .env    # a test bot's token and your test server's ID as DEV_GU
 python bot.py
 ```
 
-The Ansible's tests run against a small fake homeserver (`tests/test_ansible.py`).
+The Ansible's tests run against a small fake homeserver (`tests/test_ansible.py`); `tests/test_ansible_e2e.py` adds an encrypted room with a second member on a real matrix-nio client.
 
 ## Layout
 
@@ -135,7 +136,7 @@ The Ansible's tests run against a small fake homeserver (`tests/test_ansible.py`
 | `ursula/bot.py` | The client, command sync, error replies, health-check file |
 | `ursula/db.py` | SQLite in `/data` and its migrations (append only; the early ones are PlunderBot's and stay) |
 | `ursula/voice.py` | Every member-facing line in Ursula's voice, the cusses and the aphorisms |
-| `ursula/matrix.py` | The small Matrix client |
+| `ursula/matrix.py` | The Matrix client (matrix-nio for encryption; its own HTTP for media and redactions) |
 | `ursula/ansible_logic.py` | Turning a Discord message into a Matrix event and back |
 | `ursula/voyage_logic.py` | Gatherings: dates, times, repeats, reminders, the card |
 | `ursula/articles_logic.py` | Customs: matching words, schedules, reply templates |

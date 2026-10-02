@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.1.0 (2026-10-01)
+
+- **The Ansible works in encrypted rooms.** Ursula reads and writes end-to-end encrypted Matrix rooms (matrix-nio with vodozemac), so #potent-potables can stay mirrored to the encrypted Anarres room instead of a second, unencrypted one. Files go across encrypted too.
+- Her encryption keys live in `/data/matrix` and must survive refits. If they're lost, she needs a new Matrix login (a new device and token) to read new messages again.
+- A message whose room key hasn't arrived yet waits up to 10 minutes (Ursula asks the sender's device for it once) and is carried late rather than dropped. `/pdc settings` shows a count of any she had to give up on.
+- Messages sent before Ursula's device joined the room can't be read, as for any new Matrix device.
+- Unencrypted rooms work as before. A token without a device stops the Ansible with a clear reason instead of retrying.
+
 ## 1.0.0 (2026-10-01)
 
 Ursula's first version, forked from PlunderBot 1.6.3 for Anarres.

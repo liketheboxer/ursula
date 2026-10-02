@@ -75,12 +75,31 @@ def media_type(content_type: str | None) -> str:
 
 
 def media_matrix(filename: str, mxc: str, content_type: str | None, size: int,
-                 width: int | None = None, height: int | None = None) -> dict:
+                 width: int | None = None, height: int | None = None, keys: dict | None = None) -> dict:
+    """A file as a Matrix event. With `keys` (an encrypted room) it's the encrypted upload's "file"."""
     info: dict = {"mimetype": content_type or "application/octet-stream", "size": size}
     if width and height:
         info.update(w=width, h=height)
-    return {"msgtype": media_type(content_type), "body": filename, "filename": filename, "url": mxc,
-            "info": info, "m.mentions": {}}
+    content = {"msgtype": media_type(content_type), "body": filename, "filename": filename, "info": info,
+               "m.mentions": {}}
+    if keys:
+        content["file"] = {"url": mxc, **keys}
+    else:
+        content["url"] = mxc
+    return content
+
+
+def file_keys(f) -> dict | None:
+    """The decryption details of an encrypted Matrix file, when they're all there and well formed."""
+    if not isinstance(f, dict):
+        return None
+    key, hashes = f.get("key"), f.get("hashes")
+    k = key.get("k") if isinstance(key, dict) else None
+    sha = hashes.get("sha256") if isinstance(hashes, dict) else None
+    iv, url = f.get("iv"), f.get("url")
+    if all(isinstance(x, str) and x for x in (k, sha, iv, url)) and url.startswith("mxc://"):
+        return {"url": url, "k": k, "sha256": sha, "iv": iv}
+    return None
 
 
 # ------------------------------------------------------------ Matrix to Discord
@@ -118,10 +137,14 @@ def from_matrix(content: dict, event_type: str = "m.room.message") -> tuple[str,
         mimetype = text_of(info.get("mimetype")) or None
         # a caption, when the client sent one (body differs from the filename)
         caption = body if named and body and body != named else ""
+        sealed = file_keys(content.get("file"))     # a file in an encrypted room
+        if sealed:
+            return caption, {"url": sealed["url"], "filename": safe_filename(filename, mimetype),
+                             "mimetype": mimetype, "size": info.get("size"), "keys": sealed}
         if isinstance(url, str) and url.startswith("mxc://"):
             return caption, {"url": url, "filename": safe_filename(filename, mimetype),
                              "mimetype": mimetype, "size": info.get("size")}
-        # encrypted files (no plain url) can't be carried
+        # nothing usable to fetch
         return (caption + "\n" if caption else "") + f"-# (sent {filename}, which I can't carry across)", None
     if reply_to(content):
         body = strip_reply(body)

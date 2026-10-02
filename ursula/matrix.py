@@ -1,16 +1,24 @@
 """A small Matrix client for the Ansible: just what a one-room mirror needs.
 
 Long-polls /sync for one room's messages, sends text, edits and redactions, and moves files both ways.
-It talks the Client-Server API directly with aiohttp (no SDK to keep up with). Ursula's Matrix account
-and its access token come from Exocomp secrets (MATRIX_HOMESERVER, MATRIX_ACCESS_TOKEN); the token never
-goes in a log line or a reply.
+Plain calls (joining, names, files, redactions) go straight to the Client-Server API with aiohttp. Syncing
+and sending go through matrix-nio (1.1.0) for end-to-end encryption: it keeps Ursula's device keys,
+decrypts what arrives in an encrypted room and encrypts what she sends there. Its keys live in
+DATA_DIR/matrix/ on the unit's volume and must survive refits; lose them and Ursula needs a new login
+(a new device) to read encrypted rooms again.
+
+Ursula's Matrix account and its access token come from Exocomp secrets (MATRIX_HOMESERVER,
+MATRIX_ACCESS_TOKEN); the token never goes in a log line or a reply.
 """
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
+import time
+from pathlib import Path
 from urllib.parse import quote
 
 import aiohttp
@@ -57,22 +65,33 @@ def sync_filter(room_ids: list[str]) -> dict:
         "account_data": nothing,
         "room": {
             "rooms": list(room_ids),
-            "timeline": {"types": ["m.room.message", "m.sticker", "m.room.redaction", "m.room.member"],
+            "timeline": {"types": ["m.room.message", "m.sticker", "m.room.redaction", "m.room.member",
+                                   "m.room.encrypted", "m.room.encryption"],
                          "limit": 50},
-            "state": {"types": ["m.room.member"], "lazy_load_members": True},
+            "state": {"types": ["m.room.member", "m.room.encryption"], "lazy_load_members": True},
             "ephemeral": nothing,
             "account_data": nothing,
         },
     }
 
 
+KEY_WAIT = 600     # seconds an encrypted message waits for its room key before it's given up on
+
+
 class MatrixClient:
-    def __init__(self, homeserver: str, token: str, session: aiohttp.ClientSession | None = None):
+    def __init__(self, homeserver: str, token: str, session: aiohttp.ClientSession | None = None,
+                 store_dir: Path | None = None):
         self.homeserver = homeserver.rstrip("/")
         self._token = token
         self._session = session
         self._own_session = session is None
         self.user_id: str | None = None
+        self.device_id: str | None = None
+        self.store_dir = store_dir          # where the encryption keys live; None: no encryption
+        self._nio = None
+        self._waiting: list[tuple[float, str, object]] = []   # (first seen, room, undecrypted event)
+        self._asked: set[str] = set()                          # room-key sessions already requested
+        self.undecrypted = 0                                    # messages given up on (no key arrived)
 
     async def _http(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -81,6 +100,8 @@ class MatrixClient:
         return self._session
 
     async def close(self) -> None:
+        if self._nio is not None:
+            await self._nio.close()
         if self._own_session and self._session is not None and not self._session.closed:
             await self._session.close()
 
@@ -125,7 +146,8 @@ class MatrixClient:
 
     # ------------------------------------------------------------ account and room
     async def whoami(self) -> str:
-        self.user_id = (await self.request("GET", f"{API}/account/whoami"))["user_id"]
+        me = await self.request("GET", f"{API}/account/whoami")
+        self.user_id, self.device_id = me["user_id"], me.get("device_id")
         return self.user_id
 
     async def resolve(self, room: str) -> str:
@@ -164,20 +186,139 @@ class MatrixClient:
         except MatrixError:
             return {}
 
+    # ------------------------------------------------------------ encryption (matrix-nio)
+    async def crypto(self):
+        """The nio client that does sync, decryption and encrypted sends; None without a key store."""
+        if self._nio is not None or self.store_dir is None:
+            return self._nio
+        from nio import AsyncClient, AsyncClientConfig
+        if self.user_id is None:
+            await self.whoami()
+        if not self.device_id:
+            raise MatrixError(0, "M_NO_DEVICE", "the access token has no device, so it can't hold encryption keys")
+        self.store_dir.mkdir(parents=True, exist_ok=True)
+        config = AsyncClientConfig(encryption_enabled=True, store_sync_tokens=False, request_timeout=120,
+                                   pickle_key=hashlib.sha256(self._token.encode()).hexdigest()[:32])
+        client = AsyncClient(self.homeserver, self.user_id, self.device_id, store_path=str(self.store_dir),
+                             config=config)
+        client.restore_login(self.user_id, self.device_id, self._token)
+        self._nio = client
+        return client
+
+    def encrypted(self, room_id: str) -> bool:
+        room = self._nio.rooms.get(room_id) if self._nio is not None else None
+        return bool(room and room.encrypted)
+
+    async def _upkeep(self) -> None:
+        """Keys, as nio's own loop does it: upload ours, learn others' devices, share room keys."""
+        c = self._nio
+        for job in (c.send_to_device_messages,
+                    c.keys_upload if c.should_upload_keys else None,
+                    c.keys_query if c.should_query_keys else None,
+                    (lambda: c.keys_claim(c.get_users_for_key_claiming())) if c.should_claim_keys else None):
+            if job is None:
+                continue
+            try:
+                await job()
+            except Exception as e:   # keys are retried on the next pass
+                log.warning("Matrix key upkeep (%s) failed: %s", getattr(job, "__name__", "claim"), type(e).__name__)
+
+    def _readable(self, room_id: str, ev) -> dict | None:
+        """An event as a plain dict, or None (and held for a while) when its room key hasn't arrived."""
+        from nio import MegolmEvent
+        if isinstance(ev, MegolmEvent):
+            self._waiting.append((time.monotonic(), room_id, ev))
+            return None
+        return ev.source if isinstance(getattr(ev, "source", None), dict) else None
+
+    async def _retry_waiting(self) -> dict[str, list[dict]]:
+        """Messages whose room key has arrived since, by room; ask senders for keys still missing."""
+        from nio import EncryptionError
+        out: dict[str, list[dict]] = {}
+        still = []
+        for seen, room_id, ev in self._waiting:
+            try:
+                done = self._nio.decrypt_event(ev)
+                if isinstance(getattr(done, "source", None), dict):
+                    out.setdefault(room_id, []).append(done.source)
+                continue
+            except (EncryptionError, Exception):
+                pass
+            if time.monotonic() - seen > KEY_WAIT:
+                self.undecrypted += 1
+                log.warning("Gave up on Matrix event %s: its room key never arrived", ev.event_id)
+                continue
+            if ev.session_id not in self._asked:
+                self._asked.add(ev.session_id)
+                try:
+                    await self._nio.request_room_key(ev)
+                except Exception as e:
+                    log.info("Couldn't ask for the room key of %s: %s", ev.event_id, type(e).__name__)
+            still.append((seen, room_id, ev))
+        self._waiting = still
+        return out
+
     # ------------------------------------------------------------ reading
-    async def sync(self, since: str | None, room_ids: list[str], timeout_ms: int = 30000) -> dict:
-        params = {"filter": json.dumps(sync_filter(room_ids), separators=(",", ":")), "timeout": str(timeout_ms)}
-        if since:
-            params["since"] = since
-        else:
-            params["timeout"] = "0"
-        return await self.request("GET", f"{API}/sync", params=params, timeout=timeout_ms / 1000 + 30)
+    async def sync(self, since: str | None, room_ids: list[str], timeout_ms: int = 30000,
+                   full_state: bool = False) -> dict:
+        """One /sync, as plain dicts: {"next_batch", "rooms": {"join": {room: {"state", "timeline"}},
+        "invite": {...}}}. Encrypted messages come back decrypted (or a little later, once their key
+        arrives)."""
+        client = await self.crypto()
+        if client is None:
+            params = {"filter": json.dumps(sync_filter(room_ids), separators=(",", ":")),
+                      "timeout": str(timeout_ms if since else 0)}
+            if since:
+                params["since"] = since
+            if full_state:
+                params["full_state"] = "true"
+            return await self.request("GET", f"{API}/sync", params=params, timeout=timeout_ms / 1000 + 30)
+        from nio import SyncError
+        resp = await client.sync(timeout=timeout_ms if since else 0, sync_filter=sync_filter(room_ids),
+                                 since=since or None, full_state=full_state or None)
+        if isinstance(resp, SyncError):
+            code = resp.status_code or "M_UNKNOWN"
+            raise MatrixError(401 if code in ("M_UNKNOWN_TOKEN", "M_MISSING_TOKEN") else 0, code, resp.message)
+        await self._upkeep()
+        joined: dict[str, dict] = {}
+        for room_id, info in resp.rooms.join.items():
+            events = [d for d in (self._readable(room_id, e) for e in info.timeline.events) if d]
+            joined[room_id] = {"state": {"events": [e.source for e in info.state if isinstance(e.source, dict)]},
+                               "timeline": {"events": events}}
+        for room_id, later in (await self._retry_waiting()).items():
+            joined.setdefault(room_id, {"state": {"events": []}, "timeline": {"events": []}})
+            joined[room_id]["timeline"]["events"][:0] = later
+        return {"next_batch": resp.next_batch, "rooms": {"join": joined,
+                                                         "invite": {r: {} for r in resp.rooms.invite}}}
 
     # ------------------------------------------------------------ writing
     async def send(self, room_id: str, content: dict, txn: str, event_type: str = "m.room.message") -> str:
-        """Send an event. `txn` makes a retry safe: the same txn never posts twice."""
-        path = f"{API}/rooms/{_q(room_id)}/send/{_q(event_type)}/{_q(txn)}"
-        return (await self.request("PUT", path, body=content))["event_id"]
+        """Send an event (encrypted, in an encrypted room). `txn` makes a retry safe: the same txn never
+        posts twice."""
+        client = await self.crypto()
+        if client is None:
+            path = f"{API}/rooms/{_q(room_id)}/send/{_q(event_type)}/{_q(txn)}"
+            return (await self.request("PUT", path, body=content))["event_id"]
+        from nio import LocalProtocolError, RoomSendResponse
+        if room_id not in client.rooms:
+            # Not synced yet (just started, or just linked): fine for a room that isn't encrypted.
+            try:
+                await self.request("GET", f"{API}/rooms/{_q(room_id)}/state/m.room.encryption")
+            except MatrixError as e:
+                if e.code == "M_NOT_FOUND":
+                    path = f"{API}/rooms/{_q(room_id)}/send/{_q(event_type)}/{_q(txn)}"
+                    return (await self.request("PUT", path, body=content))["event_id"]
+                raise
+            raise MatrixError(0, "M_NOT_SYNCED", "the encrypted room hasn't been synced yet")
+        try:
+            resp = await client.room_send(room_id, event_type, content, tx_id=txn, ignore_unverified_devices=True)
+        except LocalProtocolError as e:
+            raise MatrixError(0, "M_LOCAL", str(e)) from e
+        if isinstance(resp, RoomSendResponse):
+            return resp.event_id
+        code = getattr(resp, "status_code", None) or "M_UNKNOWN"
+        raise MatrixError(401 if code in ("M_UNKNOWN_TOKEN", "M_MISSING_TOKEN") else 0, code,
+                          getattr(resp, "message", "send failed"))
 
     async def redact(self, room_id: str, event_id: str, txn: str, reason: str | None = None) -> str | None:
         path = f"{API}/rooms/{_q(room_id)}/redact/{_q(event_id)}/{_q(txn)}"

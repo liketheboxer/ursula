@@ -37,7 +37,7 @@ class Ansible(commands.Cog):
         self.bot = bot
         cfg = bot.config
         if client is None and cfg.matrix_homeserver and cfg.matrix_token:
-            client = MatrixClient(cfg.matrix_homeserver, cfg.matrix_token)
+            client = MatrixClient(cfg.matrix_homeserver, cfg.matrix_token, store_dir=cfg.data_dir / "matrix")
         self.client = client
         self.problem: str | None = None       # the last thing that went wrong, for /pdc settings and Daisho
         self.stopped = False                  # Matrix refused the token: nothing to do till a refit
@@ -49,6 +49,7 @@ class Ansible(commands.Cog):
         self._names: dict[tuple[str, str], str] = {}
         self._powers: dict[str, tuple[float, dict]] = {}   # room -> (when read, its power levels)
         self._pruned = 0.0
+        self._full_state = True       # the first sync after a start asks for the rooms' whole state
 
     @property
     def configured(self) -> bool:
@@ -80,6 +81,10 @@ class Ansible(commands.Cog):
         state = f"on: {link}"
         if self.client.user_id:
             state += f", as {self.client.user_id}"
+            if any(self.client.encrypted(r) for r in self._rooms.values()):
+                state += " (encrypted room)"
+            if self.client.undecrypted:
+                state += f". {self.client.undecrypted} encrypted message(s) couldn't be read (no key arrived)"
         if self.problem:
             state += f". Problem: {self.problem}"
         return state
@@ -87,7 +92,8 @@ class Ansible(commands.Cog):
     def status(self) -> dict:
         """For the Daisho snapshot."""
         return {"configured": self.configured, "user": self.client.user_id if self.client else None,
-                "problem": self.problem, "stopped": self.stopped, "carried": self.carried}
+                "problem": self.problem, "stopped": self.stopped, "carried": self.carried,
+                "undecrypted": self.client.undecrypted if self.client else 0}
 
     # ------------------------------------------------------------ linking (/pdc ansible link and Daisho)
     async def link(self, guild: discord.Guild, channel: discord.TextChannel, room: str) -> tuple[bool, str]:
@@ -181,6 +187,13 @@ class Ansible(commands.Cog):
             except asyncio.CancelledError:
                 raise
             except MatrixError as e:
+                if e.code == "M_NO_DEVICE":
+                    self.problem = ("Ursula's access token has no device, so she can't hold encryption keys. "
+                                    "Sign her in again for a new token; stopped until a refit.")
+                    self.stopped = True
+                    self.bot.gauge("ansible_up", 0)
+                    log.error("The Ansible stopped: the access token has no device")
+                    return
                 if e.bad_token:
                     self.problem = "Matrix refused the access token (MATRIX_ACCESS_TOKEN); stopped until a refit."
                     self.stopped = True
@@ -238,7 +251,11 @@ class Ansible(commands.Cog):
         saved_key, _, since = saved.partition("|")
         if saved_key != key:
             since = ""   # new or changed rooms: start from now, never carry the backlog
-        data = await self.client.sync(since or None, list(rooms), timeout_ms=timeout_ms)
+        # The first sync after a start (or a new room) takes the rooms' whole state, so the encryption
+        # library knows which rooms are encrypted before anything is sent to them.
+        data = await self.client.sync(since or None, list(rooms), timeout_ms=timeout_ms,
+                                      full_state=self._full_state and bool(since))
+        self._full_state = False
         if since:
             for room_id in data.get("rooms", {}).get("invite", {}):
                 if room_id in rooms:
@@ -328,6 +345,13 @@ class Ansible(commands.Cog):
         if media:
             try:
                 data = await self.client.download(media["url"], logic.FILE_LIMIT)
+                if media.get("keys"):          # a file from an encrypted room
+                    from nio.crypto.attachments import decrypt_attachment
+                    k = media["keys"]
+                    try:
+                        data = decrypt_attachment(data, k["k"], k["sha256"], k["iv"])
+                    except Exception as e:      # a damaged or mismatched file
+                        raise ValueError("couldn't decrypt") from e
                 files.append(discord.File(io.BytesIO(data), filename=media["filename"]))
             except TooBig:
                 text += f"\n-# ({media['filename']} is too big to carry across)"
@@ -468,9 +492,15 @@ class Ansible(commands.Cog):
             except discord.HTTPException as e:
                 log.warning("Couldn't read %s from Discord: %s", a.filename, e)
                 continue
-            mxc = await self.client.upload(data, a.content_type or "application/octet-stream", a.filename)
+            keys = None
+            if self.client.encrypted(room_id):     # an encrypted room gets an encrypted file
+                from nio.crypto.attachments import encrypt_attachment
+                data, keys = encrypt_attachment(data)
+                mxc = await self.client.upload(data, "application/octet-stream", a.filename)
+            else:
+                mxc = await self.client.upload(data, a.content_type or "application/octet-stream", a.filename)
             event = await self.client.send(
-                room_id, logic.media_matrix(a.filename, mxc, a.content_type, a.size, a.width, a.height),
+                room_id, logic.media_matrix(a.filename, mxc, a.content_type, a.size, a.width, a.height, keys),
                 txn=f"d{message.id}.{part}")
             await self.bot.db.ansible_link(guild_id, message.id, event, "discord", when, part=part)
         self.carried += 1

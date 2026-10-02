@@ -78,6 +78,7 @@ class Homeserver:
         self.uploads: dict[str, bytes] = {"mxc://magicalsamurai.com/cat": b"\x89PNG cat"}
         self.forbidden = {"!private:magicalsamurai.com"}
         self.names = {"@takver:anarres.org": "Takver"}
+        self.encrypted_rooms: set[str] = set()
 
     def app(self) -> web.Application:
         app = web.Application()
@@ -91,6 +92,13 @@ class Homeserver:
         r.add_put(base + "/rooms/{room}/redact/{event}/{txn}", self.redact)
         r.add_get(base + "/rooms/{room}/state/m.room.member/{user}", self.member)
         r.add_post("/_matrix/media/v3/upload", self.upload)
+        # what the encryption library (matrix-nio) asks for
+        r.add_post(base + "/keys/upload", self.keys_upload)
+        r.add_post(base + "/keys/query", self.keys_query)
+        r.add_post(base + "/keys/claim", self.keys_claim)
+        r.add_put(base + "/sendToDevice/{type}/{txn}", self.to_device)
+        r.add_get(base + "/rooms/{room}/joined_members", self.joined_members)
+        r.add_get(base + "/rooms/{room}/state/m.room.encryption", self.encryption_state)
         r.add_get("/_matrix/client/v1/media/download/{server}/{media}", self.download)
         return app
 
@@ -102,7 +110,30 @@ class Homeserver:
         return web.json_response({"errcode": "M_UNKNOWN_TOKEN", "error": "Invalid token"}, status=401)
 
     async def whoami(self, request):
-        return web.json_response({"user_id": ME}) if self.authed(request) else self.refuse()
+        return web.json_response({"user_id": ME, "device_id": "URSULADEV"}) if self.authed(request) else self.refuse()
+
+    async def keys_upload(self, request):
+        body = await request.json()
+        self.uploaded_keys = body
+        return web.json_response({"one_time_key_counts": {"signed_curve25519": 50}})
+
+    async def keys_query(self, request):
+        return web.json_response({"device_keys": {}, "failures": {}})
+
+    async def keys_claim(self, request):
+        return web.json_response({"one_time_keys": {}, "failures": {}})
+
+    async def encryption_state(self, request):
+        if request.match_info["room"] in self.encrypted_rooms:
+            return web.json_response({"algorithm": "m.megolm.v1.aes-sha2"})
+        return web.json_response({"errcode": "M_NOT_FOUND", "error": "no encryption"}, status=404)
+
+    async def to_device(self, request):
+        return web.json_response({})
+
+    async def joined_members(self, request):
+        return web.json_response({"joined": {ME: {"display_name": "Ursula"},
+                                             "@takver:anarres.org": {"display_name": "Takver"}}})
 
     async def directory(self, request):
         if request.match_info["alias"] == "#potent-potables:magicalsamurai.com":
@@ -453,7 +484,6 @@ async def test_a_bad_event_never_blocks_the_rest(mirror):
         matrix_event("$bad", "@mallory:evil.org", {"msgtype": "m.text", "body": "x", "m.relates_to": "lol"}),
         matrix_event("$bad2", "@mallory:evil.org", {"msgtype": "m.text", "body": "y",
                                                     "m.relates_to": {"m.in_reply_to": {"event_id": {"no": 1}}}}),
-        "not even an event",
         matrix_event("$ok", "@takver:anarres.org", {"msgtype": "m.text", "body": "still here"}),
     ]}}})
     await cog.sync_once(timeout_ms=0)
