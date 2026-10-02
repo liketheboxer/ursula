@@ -12,6 +12,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from .. import presence_logic as PL
 from ..timeutil import valid_timezone
 from ..region_logic import guess_zone
 from ..voyage_logic import zone_from_name
@@ -26,6 +27,7 @@ class Admin(commands.GroupCog, group_name="pdc", group_description="Ursula's set
     regions = app_commands.Group(name="regions", description="Region roles that set members' time zones")
     music = app_commands.Group(name="salas", description="Salas: music in voice channels")
     ansible = app_commands.Group(name="ansible", description="The Ansible: mirror a channel to a Matrix room")
+    status = app_commands.Group(name="status", description="What shows under Ursula's name in Discord")
 
     def __init__(self, bot):
         self.bot = bot
@@ -273,6 +275,46 @@ class Admin(commands.GroupCog, group_name="pdc", group_description="Ursula's set
         if cog and cog.configured:
             text += f"\nMessages carried since Ursula last started: {cog.carried}."
         await interaction.response.send_message(text, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+
+    # ------------------------------------------------------------ the status under the name
+    async def _status_reply(self, interaction: discord.Interaction, lead: str) -> None:
+        cog = self.bot.get_cog("Presence")
+        s = await self.bot.db.get_settings(interaction.guild_id)
+        want = PL.plan(s.presence_status, s.presence_kind, s.presence_text, bool(s.presence_music),
+                       cog.song() if cog else None)
+        music = "on" if s.presence_music else "off"
+        await interaction.response.send_message(
+            f"{lead}\nShowing: {PL.describe(want)}\nNow Playing while music plays: {music}", ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none())
+
+    @status.command(name="set", description="Set the line under Ursula's name, and her dot")
+    @app_commands.describe(text="Up to 128 characters (run it with nothing at all to clear the line)",
+                           kind="How Discord words it", dot="Online, Idle, Do Not Disturb or Invisible")
+    @app_commands.choices(kind=[app_commands.Choice(name=v, value=k) for k, v in PL.KINDS.items()],
+                          dot=[app_commands.Choice(name=v, value=k) for k, v in PL.STATUSES.items()])
+    async def status_set(self, interaction: discord.Interaction, text: app_commands.Range[str, 0, 300] | None = None,
+                         kind: app_commands.Choice[str] | None = None,
+                         dot: app_commands.Choice[str] | None = None) -> None:
+        values = {}
+        if text is not None or (kind is None and dot is None):     # nothing at all given: clear the line
+            values["presence_text"] = PL.clean(text)
+        if kind is not None:
+            values["presence_kind"] = kind.value
+        if dot is not None:
+            values["presence_status"] = dot.value
+        await self.bot.db.update_settings(interaction.guild_id, **values)
+        self.bot.presence_changed()
+        await self._status_reply(interaction, "Saved. Discord shows it within a few seconds.")
+
+    @status.command(name="music", description="Show \"Now Playing: <song>\" while music plays")
+    async def status_music(self, interaction: discord.Interaction, on: bool) -> None:
+        await self.bot.db.update_settings(interaction.guild_id, presence_music=int(on))
+        self.bot.presence_changed()
+        await self._status_reply(interaction, "Saved.")
+
+    @status.command(name="show", description="What shows under Ursula's name now")
+    async def status_show(self, interaction: discord.Interaction) -> None:
+        await self._status_reply(interaction, "**Status**")
 
 
 async def setup(bot) -> None:

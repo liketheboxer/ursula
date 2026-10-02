@@ -38,6 +38,7 @@ Inside the code the PlunderBot names stay (a gathering is a `Voyage`, a custom a
 | `/pdc gatherings channel` | Manage Server | Where gathering cards go (empty: wherever `/gathering call` is used) |
 | `/pdc regions auto` | Manage Server | Match region roles to time zones. Also `set`, `clear`, `list` |
 | `/pdc salas status` | Manage Server | How music is set up. Also `enable`, `youtube`, `djrole`, `channel`, `settings` |
+| `/pdc status set` | Manage Server | The line under Ursula's name, how it's worded (Playing, Listening to...) and her dot. Also `music` (Now Playing: song while Salas plays; on by default) and `show` |
 | `/pdc ansible link` | Manage Server | Mirror a channel and a Matrix room, and switch it on. Also `enable` (on/off, the link is kept) and `status` |
 
 ### How Gatherings work

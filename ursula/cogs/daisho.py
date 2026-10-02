@@ -32,6 +32,7 @@ import aiohttp
 import discord
 from discord.ext import commands, tasks
 
+from .. import presence_logic as PL
 from .. import images, links
 from ..articles_logic import (ACTIONS, COOLDOWN_SCOPES, MATCHES, MAX_ACTIONS, MAX_REPLIES, SCHEDULE, TRIGGERS,
                               action_problem, clean_name, next_run, parse_schedule, server_emoji, split_keywords)
@@ -140,6 +141,9 @@ def _channel_kind(c) -> str | None:
 # ------------------------------------------------------------ what the Settings screen may change
 # key: (kind, low, high). Kinds match the screen: text, category, forum, role, bool, int, zone.
 SETTINGS = {
+    # the status under the bot's name: the dot, the kind of line, the line, and Now Playing while music plays
+    "presence_status": ("choice", 0, 0), "presence_kind": ("choice", 0, 0), "presence_text": ("line", 0, 128),
+    "presence_music": ("bool", 0, 1),
     "timezone": ("zone", 0, 0),
     "voyage_channel_id": ("text", 0, 0),
     "music_enabled": ("bool", 0, 1), "music_youtube": ("bool", 0, 1), "music_dj_role_id": ("role", 0, 0),
@@ -342,6 +346,8 @@ class Daisho(commands.Cog):
         music = self.bot.get_cog("Music")
         s["music_has_cookies"] = bool(music and music.resolver.cookies)
         s["music_has_spotify"] = bool(music and music.resolver.cfg.spotify)
+        presence = self.bot.get_cog("Presence")
+        s["presence_showing"] = PL.describe(presence.applied) if presence and presence.applied else None
         return s
 
     async def snap_articles(self, guild):
@@ -407,6 +413,15 @@ class Daisho(commands.Cog):
     # ------------------------------------------------------------ applying: settings
     def _check_value(self, guild, key: str, value):
         kind, lo, hi = SETTINGS[key]
+        if kind == "choice":
+            allowed = PL.STATUSES if key == "presence_status" else PL.KINDS
+            if value not in allowed:
+                raise ApplyError(f"{key.replace('_', ' ')} must be one of: {', '.join(allowed)}.")
+            return value
+        if kind == "line":
+            if value is not None and not isinstance(value, str):
+                raise ApplyError(f"{key.replace('_', ' ')} must be text.")
+            return PL.clean(value)
         if kind == "zone":
             if not isinstance(value, str) or not valid_timezone(value):
                 raise ApplyError(f"{value!r} isn't a time zone.")
@@ -478,6 +493,8 @@ class Daisho(commands.Cog):
         self.mark("settings", "guild")   # saved: the screen shows it even if a follow-up step below trips
         if ansible is not None and {"ansible_enabled", "ansible_channel_id", "ansible_room"} & set(fields):
             ansible.settings_changed()
+        if {"presence_status", "presence_kind", "presence_text", "presence_music"} & set(values):
+            self.bot.presence_changed()
         if "timezone" in values and values["timezone"] != before.timezone:
             await self._reschedule_articles(guild)
         self.mark("settings", "guild")

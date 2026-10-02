@@ -440,6 +440,7 @@ class Music(commands.Cog):
         return e
 
     async def post_np(self, guild: discord.Guild, p: Player) -> None:
+        self.bot.presence_changed()          # "Now Playing: <song>" under the bot's name
         await self.clear_np(p)
         channel = self.text_channel(guild, p)
         if channel is None or p.queue.current is None:
@@ -458,6 +459,7 @@ class Music(commands.Cog):
                 pass
 
     async def clear_np(self, p: Player) -> None:
+        self.bot.presence_changed()          # the song may have stopped
         if p.np_message is not None:
             msg, p.np_message = p.np_message, None
             try:

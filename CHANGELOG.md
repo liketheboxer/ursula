@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.0 (2026-10-01): the status under her name
+
+- **Ursula's status in Discord** (the dot and the line under her name) is a setting: the line (up to 128 characters), how Discord words it (just the text, Playing, Listening to, Watching, Competing in) and the dot (Online, Idle, Do Not Disturb, Invisible). Set it on Daisho's Settings screen (**Bot status**) or with `/pdc status set`; `/pdc status show` says what's showing.
+- **Now Playing:** while Salas plays, the line reads `Now Playing: <song>`, and goes back when the music stops. On by default; `/pdc status music` or the screen switches it off.
+- Discord limits how often a bot changes its status, so changes are spaced at least 5 seconds apart, and only sent when what shows actually changes.
+
 ## 1.1.0 (2026-10-01)
 
 - **The Ansible works in encrypted rooms.** Ursula reads and writes end-to-end encrypted Matrix rooms (matrix-nio with vodozemac), so #potent-potables can stay mirrored to the encrypted Anarres room instead of a second, unencrypted one. Files go across encrypted too.

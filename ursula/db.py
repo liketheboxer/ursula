@@ -447,6 +447,13 @@ MIGRATIONS: list[str] = [
     CREATE UNIQUE INDEX ansible_links_event ON ansible_links (matrix_event);
     CREATE TABLE ansible_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
     """,
+    # Ursula 1.2.0 presence: the status under the bot's name (Daisho or a slash command), and Now Playing while music plays
+    """
+    ALTER TABLE guild_settings ADD COLUMN presence_status TEXT NOT NULL DEFAULT 'online';
+    ALTER TABLE guild_settings ADD COLUMN presence_kind TEXT NOT NULL DEFAULT 'custom';
+    ALTER TABLE guild_settings ADD COLUMN presence_text TEXT;
+    ALTER TABLE guild_settings ADD COLUMN presence_music INTEGER NOT NULL DEFAULT 1;
+    """,
 ]
 
 
@@ -496,6 +503,10 @@ class GuildSettings:
     ansible_channel_id: int | None = None
     ansible_room: str | None = None
     ansible_webhook_id: int | None = None
+    presence_status: str = "online"
+    presence_kind: str = "custom"
+    presence_text: str | None = None
+    presence_music: int = 1
 
 
 @dataclass
@@ -564,7 +575,7 @@ class Boarding:
     reminded_at: str | None = None
 
 
-_SETTING_COLUMNS = {"ansible_enabled", "ansible_channel_id", "ansible_room", "ansible_webhook_id", "ledger_reminders", "music_enabled", "music_youtube", "music_dj_role_id", "music_channel_id",
+_SETTING_COLUMNS = {"presence_status", "presence_kind", "presence_text", "presence_music", "ansible_enabled", "ansible_channel_id", "ansible_room", "ansible_webhook_id", "ledger_reminders", "music_enabled", "music_youtube", "music_dj_role_id", "music_channel_id",
                     "music_idle_minutes", "music_volume", "music_stay", "parley_enabled", "parley_budget_cents", "parley_daily", "parley_kagi_daily",
                     "shipslog_channel_id", "shipslog_weekday", "shipslog_hour", "shipslog_last",
                     "crowsnest_enabled", "forum_channel_id", "gangplank_enabled", "intro_channel_id", "pending_role_id", "harbormaster_role_id",
