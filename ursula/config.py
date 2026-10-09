@@ -19,7 +19,7 @@ class Config:
     ready_file: Path
     log_level: str
     # The Ansible: Ursula's Matrix account (MATRIX_HOMESERVER, MATRIX_ACCESS_TOKEN). Without them the mirror
-    # stays off; which Discord channel and Matrix room are mirrored is set with /pdc ansible.
+    # stays off; which Discord channels and Matrix rooms are mirrored is set with /pdc ansible.
     matrix_homeserver: str | None = None
     matrix_token: str | None = field(default=None, repr=False)
     # The Magical Samurai's Ursula module (Daisho). Exocomp sets all of these at each refit once the

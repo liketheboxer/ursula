@@ -223,7 +223,7 @@ async def test_both_ways_in_an_encrypted_room(secret):
     f = image["file"]
     plain = decrypt_attachment(hs.media[f["url"]], f["key"]["k"], f["hashes"]["sha256"], f["iv"])
     assert plain == b"woof"
-    assert "encrypted room" in cog.describe(await bot.db.get_settings(10))
+    assert "(encrypted)" in await cog.describe_guild(10)
 
 
 async def test_a_key_that_arrives_late_still_unlocks_the_message(secret):

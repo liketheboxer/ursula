@@ -13,7 +13,7 @@ def test_every_line_fills_in(key):
                   title="Film Night", link="https://x", reminders="1 day, 1 hour before", error="Bad date.",
                   when="in 1 hour", zone="America/New_York (EDT)", local="8:00 PM", member="@Newbie",
                   changes="Added @UK.", forum="#threads", position=3, count=12, name="Work Songs",
-                  reason="it's private", place="Where: Abbenay Square")
+                  reason="it's private", place="Where: Abbenay Square", thread="#lobby")
     fields = {f for line in voice.LINES[key] for _, f, _, _ in string.Formatter().parse(line) if f}
     assert fields <= set(values) | {"cuss", "aphorism"}, f"{key} uses unknown fields: {fields - set(values)}"
     for i in range(len(voice.LINES[key]) * 4):

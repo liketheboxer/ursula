@@ -221,10 +221,12 @@ def test_starter_guide_links_this_servers_channels():
     assert "{events}" in text and "{mirror}" in text
     for word in ("pirate", "crew", "voyage", "ship"):
         assert word not in text.lower()
-    linked = starter_text(text, SimpleNamespace(ansible_channel_id=77, voyage_channel_id=88))
-    assert "<#77>" in linked and "<#88>" in linked and "{" not in linked
-    plain = starter_text(text, SimpleNamespace(ansible_channel_id=None, voyage_channel_id=None))
-    assert "the gatherings channel" in plain and "{" not in plain
+    linked = starter_text(text, SimpleNamespace(voyage_channel_id=88), [77])
+    assert "<#77> is carried" in linked and "<#88>" in linked and "{" not in linked
+    both = starter_text(text, SimpleNamespace(voyage_channel_id=88), [77, 78, 79])
+    assert "<#77>, <#78> and <#79> are each carried to their own Matrix room" in both
+    plain = starter_text(text, SimpleNamespace(voyage_channel_id=None))
+    assert "the gatherings channel" in plain and "One channel is carried" in plain and "{" not in plain
 
 
 # ------------------------------------------------------------ banners: a picture above each section

@@ -435,3 +435,45 @@ def render_voyage(v, rsvps: Rsvps, profile=None, emoji: str = "", crew_link: str
         embed.set_footer(text=f"Reminders: {format_reminders(v.reminder_minutes)}. "
                               "Everyone Going or Maybe gets a ping at the start.")
     return embed
+
+
+# ------------------------------------------------------------ the lobby thread
+# A thread on the event's card that opens a while before it starts: everyone Going or Maybe is tagged in it,
+# the maybes can answer there, and last-minute plans stay out of the main channel. The reminder due at the
+# same time is replaced by it; later reminders go into the thread.
+LOBBY_CHOICES = [15, 30, 60, 120, 180, 360, 720, 1440]
+LOBBY_MAX = 1440
+
+
+def lobby_for(own: int | None, server_default: int) -> int:
+    """Minutes before the start that this event's lobby opens (0: none). None on the event: the server's."""
+    minutes = server_default if own is None else own
+    return minutes if isinstance(minutes, int) and 0 < minutes <= LOBBY_MAX else 0
+
+
+def lobby_due(starts: datetime, minutes: int, state: str, now: datetime) -> bool:
+    """Whether the lobby should open now: it has a time, hasn't been tried, and the start is still ahead."""
+    return minutes > 0 and not state and starts - timedelta(minutes=minutes) <= now < starts
+
+
+def parse_lobby(text: str | None) -> int | None:
+    """"default" (or nothing): None, the server's setting. "off"/"none"/"0": 0. Otherwise one time like the
+    reminders take (1h, 30m), between 5 minutes and a day."""
+    t = (text or "").strip().lower()
+    if t in ("", "default", "server default"):
+        return None
+    if t in ("off", "none", "no", "0"):
+        return 0
+    found = parse_reminders(t)
+    if len(found) != 1:
+        raise ParseError("Give one time for the lobby, like 1h or 30m (or off).")
+    if not 5 <= found[0] <= LOBBY_MAX:
+        raise ParseError("The lobby opens between 5 minutes and a day before the start.")
+    return found[0]
+
+
+def format_lobby(minutes: int) -> str:
+    """"1 hour before", or "no lobby"."""
+    if not minutes:
+        return "no lobby"
+    return format_reminders([minutes])

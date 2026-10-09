@@ -21,7 +21,8 @@ from .. import images, links, voice
 from ..timeutil import PING_COOLDOWN, iso, now_utc, zone
 from ..db import Voyage
 from ..mentions import send_pinging
-from ..voyage_logic import (REMINDER_PRESETS, ParseError, describe_repeat, due_reminder, following,
+from .lobby import LobbyMixin
+from ..voyage_logic import (LOBBY_CHOICES, format_lobby, lobby_due, parse_lobby, REMINDER_PRESETS, ParseError, describe_repeat, due_reminder, following,
                             format_reminders, format_skips, is_weekday_name, overdue_reminders, parse_date,
                             nth_of, parse_reminders, parse_skips, parse_time, placement, render_voyage, repeat_choices,
                             resolve_repeat, split_zone, to_utc, upcoming_dates, zone_label)
@@ -33,6 +34,9 @@ PINGS = {"posted": "Tag the role when it's posted",
          "off": "Don't tag the role"}
 EMOJI = "🌒"   # Anarres, the moon
 PING_CHOICES = [app_commands.Choice(name=label, value=key) for key, label in PINGS.items()]
+LOBBY_OPTIONS = [app_commands.Choice(name="The server's default", value="default"),
+                 app_commands.Choice(name="No lobby thread", value="off")] + [
+    app_commands.Choice(name=format_lobby(m), value=f"{m}m") for m in LOBBY_CHOICES]
 BUTTONS = {
     "aboard": ("Going", discord.ButtonStyle.success),
     "maybe": ("Maybe", discord.ButtonStyle.secondary),
@@ -100,7 +104,7 @@ def _link(v: Voyage) -> str:
 
 
 @app_commands.guild_only()
-class Voyages(commands.GroupCog, group_name="gathering", group_description="Gatherings: call one, answer one, see what's on"):
+class Voyages(LobbyMixin, commands.GroupCog, group_name="gathering", group_description="Gatherings: call one, answer one, see what's on"):
     def __init__(self, bot):
         self.bot = bot
         self.lock = asyncio.Lock()
@@ -160,7 +164,11 @@ class Voyages(commands.GroupCog, group_name="gathering", group_description="Gath
             return f"{role.name} can't be tagged by everyone. Pick a role the server lets anyone mention."
         return None
 
+    def card_view(self, v: Voyage) -> discord.ui.View:
+        return voyage_view(v)
+
     async def refresh(self, guild: discord.Guild | None, v: Voyage, new_image: bool = False) -> None:
+        await self.close_lobby(guild, v)
         if guild is None or not v.message_id:
             return
         channel = guild.get_channel(v.channel_id)
@@ -265,8 +273,9 @@ class Voyages(commands.GroupCog, group_name="gathering", group_description="Gath
         repeat_ends="For a repeating gathering: the last date it runs (leave empty to keep going)",
         duration="How long it runs, in minutes",
         image="A picture for the card",
-        notify="When to tag the role (default: when it's posted)")
-    @app_commands.choices(notify=PING_CHOICES)
+        notify="When to tag the role (default: when it's posted)",
+        lobby="When the lobby thread opens before the start (default: the server's setting)")
+    @app_commands.choices(notify=PING_CHOICES, lobby=LOBBY_OPTIONS)
     async def call(self, interaction: discord.Interaction, title: app_commands.Range[str, 1, 80],
                    date: str, time: str, place: app_commands.Range[str, 1, 100] | None = None,
                    role: discord.Role | None = None, seats: app_commands.Range[int, 1, 999] | None = None,
@@ -274,7 +283,8 @@ class Voyages(commands.GroupCog, group_name="gathering", group_description="Gath
                    reminders: str | None = None, repeat: str | None = None,
                    duration: app_commands.Range[int, 15, 720] = 120,
                    image: discord.Attachment | None = None,
-                   notify: app_commands.Choice[str] | None = None, repeat_ends: str | None = None) -> None:
+                   notify: app_commands.Choice[str] | None = None, repeat_ends: str | None = None,
+                   lobby: app_commands.Choice[str] | None = None) -> None:
         guild = interaction.guild
         tz, whose = await self.reading_zone(interaction.user.id, guild.id)
         now = now_utc()
@@ -321,7 +331,8 @@ class Voyages(commands.GroupCog, group_name="gathering", group_description="Gath
                               capacity=seats, starts=starts, duration=duration, minutes=minutes,
                               repeat=repeat_code, ping_role=notify.value if notify else "posted",
                               image=image_name, repeat_until=until, place=(place or "").strip() or None,
-                              notify_role_id=role.id if role else None)
+                              notify_role_id=role.id if role else None,
+                              lobby_minutes=parse_lobby(lobby.value) if lobby else None)
         if v is None:
             await interaction.followup.send(voice.say("crew_cant_post"), ephemeral=True)
             return
@@ -334,7 +345,8 @@ class Voyages(commands.GroupCog, group_name="gathering", group_description="Gath
                      description: str | None, capacity: int | None, starts: datetime, duration: int,
                      minutes: list[int], repeat: str, ping_role: str, image: str | None = None,
                      repeat_until: str | None = None, place: str | None = None,
-                     notify_role_id: int | None = None) -> Voyage | None:
+                     notify_role_id: int | None = None,
+                     lobby_minutes: int | None = None) -> Voyage | None:
         """Save a new gathering with its caller Going and post its card. None if the card couldn't go up.
         Used by /gathering call and by the Daisho screens."""
         now = now_utc()
@@ -344,7 +356,7 @@ class Voyages(commands.GroupCog, group_name="gathering", group_description="Gath
             capacity=capacity, starts_at=iso(starts), duration_min=duration,
             reminders=",".join(str(m) for m in minutes), repeat=repeat,
             created_at=iso(now), image=image, ping_role=ping_role,
-            repeat_until=repeat_until if repeat != "none" else None,
+            repeat_until=repeat_until if repeat != "none" else None, lobby_minutes=lobby_minutes,
             place=place, notify_role_id=notify_role_id)
         v = await self.bot.db.update_voyage(v.id, series_id=v.id)
         await self.bot.db.set_rsvp(v.id, organizer_id, "aboard", iso(now))
@@ -555,8 +567,9 @@ class Voyages(commands.GroupCog, group_name="gathering", group_description="Gath
                            repeat="How it repeats from here on (or Doesn't repeat to stop)",
                            repeat_ends="The last date the series runs, or never",
                            skip="Skip one date of the series (this gathering's own date calls off just this one)",
-                           unskip="Put a skipped date back")
-    @app_commands.choices(notify=PING_CHOICES)
+                           unskip="Put a skipped date back",
+                           lobby="When the lobby thread opens before the start")
+    @app_commands.choices(notify=PING_CHOICES, lobby=LOBBY_OPTIONS)
     async def edit(self, interaction: discord.Interaction, voyage: str,
                    title: app_commands.Range[str, 1, 80] | None = None, date: str | None = None,
                    time: str | None = None, place: app_commands.Range[str, 1, 100] | None = None,
@@ -565,7 +578,8 @@ class Voyages(commands.GroupCog, group_name="gathering", group_description="Gath
                    reminders: str | None = None, seats: app_commands.Range[int, 1, 999] | None = None,
                    image: discord.Attachment | None = None, remove_image: bool = False,
                    notify: app_commands.Choice[str] | None = None, repeat: str | None = None,
-                   repeat_ends: str | None = None, skip: str | None = None, unskip: str | None = None) -> None:
+                   repeat_ends: str | None = None, skip: str | None = None, unskip: str | None = None,
+                   lobby: app_commands.Choice[str] | None = None) -> None:
         v = await self._fetch_manageable(interaction, voyage)
         if v is None:
             return
@@ -577,7 +591,8 @@ class Voyages(commands.GroupCog, group_name="gathering", group_description="Gath
             changes, skip_this, tz, whose, starts = await self.plan_edit(
                 v, interaction.user.id, title=title, date=date, time=time, description=description,
                 reminders=reminders, seats=seats, notify=notify.value if notify else None, repeat=repeat,
-                repeat_ends=repeat_ends, skip=skip, unskip=unskip, place=place)
+                repeat_ends=repeat_ends, skip=skip, unskip=unskip, place=place,
+                lobby=lobby.value if lobby else None)
         except EditRefused as e:
             await interaction.response.send_message(voice.say(e.key, **e.kw), ephemeral=True)
             return
@@ -614,7 +629,8 @@ class Voyages(commands.GroupCog, group_name="gathering", group_description="Gath
                         time: str | None = None, description: str | None = None, reminders: str | None = None,
                         seats: int | None = None, notify: str | None = None, repeat: str | None = None,
                         repeat_ends: str | None = None, skip: str | None = None, unskip: str | None = None,
-                        place: str | None = None):
+                        place: str | None = None,
+                        lobby: str | None = None):
         """Work out the changes an edit makes, as /gathering edit and Parley (1.6.0) both ask for it: the times
         read in the member's own zone (or one they typed). Returns (changes, skip_this, tz, whose, starts);
         raises EditRefused with the voice line to answer with."""
@@ -639,6 +655,8 @@ class Voyages(commands.GroupCog, group_name="gathering", group_description="Gath
                 changes.update(starts_at=iso(starts), reminders_sent="")
             if reminders is not None:
                 changes.update(reminders=",".join(str(m) for m in parse_reminders(reminders)), reminders_sent="")
+            if lobby is not None:
+                changes["lobby_minutes"] = parse_lobby(lobby)
             if repeat or repeat_ends or skip or unskip or (starts is not None and v.repeat != "none"):
                 stz = await self.tz(v.guild_id)
                 today = datetime.now(stz).date()
@@ -740,10 +758,19 @@ class Voyages(commands.GroupCog, group_name="gathering", group_description="Gath
                 return None
             if "starts_at" in changes or "reminders" in changes:
                 await self._reset_reminder_baseline(voyage_id)
+            if ("starts_at" in changes or "lobby_minutes" in changes) and current.lobby_state in ("opening", "failed"):
+                changes = {**changes, "lobby_state": ""}
             v = await self.bot.db.update_voyage(voyage_id, **changes)
             promoted = await self._promote_waitlist(v)
         await self.refresh(guild, v, new_image="image" in changes)
         await self.sync_event(guild, v)
+        if v.lobby_state == "open" and ("starts_at" in changes or "lobby_minutes" in changes):
+            lobby = await self.lobby_minutes(v)
+            if not lobby or now_utc() < datetime.fromisoformat(v.starts_at) - timedelta(minutes=lobby):
+                await self.park_lobby(guild, v)       # outside its window now: it opens again in time
+            elif "starts_at" in changes:
+                await self.lobby_note(guild, v, "lobby_moved",
+                                      when=f"<t:{int(datetime.fromisoformat(v.starts_at).timestamp())}:F>")
         await self._announce_promotions(guild, v, promoted)
         return v
 
@@ -755,17 +782,17 @@ class Voyages(commands.GroupCog, group_name="gathering", group_description="Gath
             if current is None or current.status != "scheduled":
                 return False
             v = await self.bot.db.update_voyage(voyage_id, status="cancelled")
-        await self.refresh(guild, v)
-        await self.sync_event(guild, v, "cancel")
         rsvps = await self.bot.db.rsvps(v.id)
         people = rsvps.aboard + rsvps.maybe + rsvps.waitlist
-        channel = guild.get_channel(v.channel_id)
+        channel = await self.where_to_ping(guild, v)
         if channel is not None and people:
             line = voice.say("voyage_cancelled", title=v.title, names="{names}")
             try:
                 await send_pinging(channel, lambda names: line.replace("{names}", names), people)
             except discord.HTTPException as e:
                 log.warning("Couldn't announce the cancellation of voyage %s: %s", v.id, e)
+        await self.refresh(guild, v)
+        await self.sync_event(guild, v, "cancel")
         if v.repeat != "none" and not whole_series:
             await self.schedule_next(guild, v)
         return True
@@ -812,6 +839,7 @@ class Voyages(commands.GroupCog, group_name="gathering", group_description="Gath
         if v is not None:
             await self.refresh(interaction.guild, v)
             await self._announce_promotions(interaction.guild, v, promoted)
+            await self.add_to_lobby(interaction.guild, v, interaction.user.id)
 
     async def rsvp_as(self, guild: discord.Guild, voyage_id: int, user_id: int, action: str | None) -> tuple[bool, str]:
         """Set a member's answer from the Daisho screens (1.2.0): aboard, maybe, cant, or None to clear it.
@@ -821,6 +849,7 @@ class Voyages(commands.GroupCog, group_name="gathering", group_description="Gath
         if v is not None:
             await self.refresh(guild, v)
             await self._announce_promotions(guild, v, promoted)
+            await self.add_to_lobby(guild, v, user_id)
         return v is not None, reply
 
     async def _rsvp(self, voyage_id: int, user_id: int, action: str | None, toggle: bool):
@@ -903,36 +932,54 @@ class Voyages(commands.GroupCog, group_name="gathering", group_description="Gath
         await self.bot.wait_until_ready()
 
     async def tick(self, guild: discord.Guild, voyage_id: int, now: datetime) -> None:
-        """Send a due reminder, or start the voyage. Reads the voyage fresh under the lock, so an edit or
-        cancel that just happened is always respected."""
+        """Open the lobby thread, send a due reminder, or start it. Reads it fresh under the lock, so an edit
+        or cancel that just happened is always respected."""
+        opening, replaced = False, set()
         async with self.lock:
             v = await self.bot.db.get_voyage(voyage_id)
             if v is None or v.status != "scheduled":
                 return
             starts = datetime.fromisoformat(v.starts_at)
-            if now >= starts:
-                starting = True
-            else:
-                starting = False
-                created = datetime.fromisoformat(v.created_at)
-                skipped = overdue_reminders(starts, created, v.reminder_minutes, v.sent_minutes, now)
-                due = due_reminder(starts, created, v.reminder_minutes, v.sent_minutes, now)
-                if due is None and not skipped:
-                    return
-                # A reminder due now makes any earlier (longer) ones that never went out pointless.
-                sent = set(v.sent_minutes) | set(skipped)
-                if due is not None:
-                    sent |= {m for m in v.reminder_minutes if m >= due}
-                v = await self.bot.db.update_voyage(v.id, reminders_sent=",".join(str(m) for m in sorted(sent)))
-                if due is None:
-                    return
+            starting = now >= starts
+            if not starting:
+                if v.lobby_state == "opening" and v.id not in self._openings():
+                    v = await self.bot.db.update_voyage(v.id, lobby_state="")    # left half-made by a restart
+                lobby = await self.lobby_minutes(v)
+                if lobby_due(starts, lobby, v.lobby_state, now):
+                    # the lobby's ping is the reminder for that time (and any longer one still unsent), and
+                    # a reminder whose time has passed already (the clock was late) is pointless now
+                    left = (starts - now).total_seconds() / 60
+                    replaced = {m for m in v.reminder_minutes if m >= lobby and m not in v.sent_minutes}
+                    sent = set(v.sent_minutes) | {m for m in v.reminder_minutes if m >= min(lobby, left)}
+                    v = await self.bot.db.update_voyage(v.id, lobby_state="opening",
+                                                        reminders_sent=",".join(str(m) for m in sorted(sent)))
+                    opening = True
+                else:
+                    created = datetime.fromisoformat(v.created_at)
+                    skipped = overdue_reminders(starts, created, v.reminder_minutes, v.sent_minutes, now)
+                    due = due_reminder(starts, created, v.reminder_minutes, v.sent_minutes, now)
+                    if due is None and not skipped:
+                        return
+                    # A reminder due now makes any earlier (longer) ones that never went out pointless.
+                    sent = set(v.sent_minutes) | set(skipped)
+                    if due is not None:
+                        sent |= {m for m in v.reminder_minutes if m >= due}
+                    v = await self.bot.db.update_voyage(v.id, reminders_sent=",".join(str(m) for m in sorted(sent)))
+                    if due is None:
+                        return
                 rsvps = await self.bot.db.rsvps(v.id)
         if starting:
             await self.start(guild, v, now, late=now - starts > LATE_START_LIMIT)
             return
+        if opening:
+            if await self.open_lobby(guild, v, rsvps, starts) or not replaced:
+                return          # opened; or no thread, and no reminder was due then either
+        # a reminder (or the lobby's, when the thread couldn't be made): into the lobby while it's open, where
+        # everyone's already tagged in, otherwise the channel
+        lobby = await self.lobby_thread(guild, v)
         people = rsvps.aboard + rsvps.maybe
-        channel = guild.get_channel(v.channel_id)
-        role = await self.game_role(guild, v) if v.ping_role == "reminders" else None
+        channel = lobby or guild.get_channel(v.channel_id)
+        role = await self.game_role(guild, v) if v.ping_role == "reminders" and lobby is None else None
         if channel is None or not (people or role):
             return
         line = voice.say("voyage_reminder", title=v.title, when=f"<t:{int(starts.timestamp())}:R>",
@@ -959,12 +1006,13 @@ class Voyages(commands.GroupCog, group_name="gathering", group_description="Gath
         await self.sync_event(guild, v, "start")
         if late:      # Ursula was down through the start: it's under way, but nobody is pinged late
             return
-        channel = guild.get_channel(v.channel_id)
+        channel = await self.where_to_ping(guild, v)       # the lobby, while it's open
         if channel is None:
             return
         rsvps = await self.bot.db.rsvps(v.id)
         people = rsvps.aboard + [u for u in rsvps.maybe if u not in rsvps.aboard]
-        role = await self.game_role(guild, v) if v.ping_role == "reminders" else None
+        # the role heard of the lobby already; in the lobby itself, only the people are pinged
+        role = await self.game_role(guild, v) if v.ping_role == "reminders" and v.lobby_state != "open" else None
         if not (people or role):
             return
         place = f"Where: {v.place}" if v.place else _link(v)
@@ -1017,6 +1065,7 @@ class Voyages(commands.GroupCog, group_name="gathering", group_description="Gath
                 description=v.description, game_key=v.game_key, size_label=v.size_label, capacity=v.capacity,
                 starts_at=iso(nxt), duration_min=v.duration_min, reminders=v.reminders, repeat=v.repeat,
                 series_id=series, created_at=iso(now_utc()), image=v.image, ping_role=v.ping_role,
+                lobby_minutes=v.lobby_minutes,
                 repeat_until=v.repeat_until, place=v.place, notify_role_id=v.notify_role_id,
                 skips=format_skips(parse_skips(v.skips), after=nxt.astimezone(tz).date()))
             await self.bot.db.set_rsvp(new.id, v.organizer_id, "aboard", iso(now_utc()))

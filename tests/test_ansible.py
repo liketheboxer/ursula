@@ -12,6 +12,7 @@ from ursula import ansible_logic as logic
 from ursula.matrix import MatrixClient, MatrixError, TooBig
 
 ROOM = "!oDGEuyxATmlQSlftFv:magicalsamurai.com"
+ROOM2 = "!filmclub:magicalsamurai.com"
 ME = "@ursula:magicalsamurai.com"
 TOKEN = "syt_test"
 
@@ -75,6 +76,7 @@ class Homeserver:
         self.redacted: list[tuple[str, str]] = []
         self.batches: list[dict] = []
         self.sinces: list[str | None] = []
+        self.full_states: list[bool] = []
         self.uploads: dict[str, bytes] = {"mxc://magicalsamurai.com/cat": b"\x89PNG cat"}
         self.forbidden = {"!private:magicalsamurai.com"}
         self.names = {"@takver:anarres.org": "Takver"}
@@ -150,6 +152,7 @@ class Homeserver:
         if not self.authed(request):
             return self.refuse()
         self.sinces.append(request.query.get("since"))
+        self.full_states.append(request.query.get("full_state") == "true")
         batch = self.batches.pop(0) if self.batches else {}
         return web.json_response({"next_batch": f"s{len(self.sinces)}", "rooms": {"join": batch}})
 
@@ -243,6 +246,9 @@ class Webhook:
     async def delete_message(self, mid):
         self.deleted.append(mid)
 
+    async def delete(self, reason=None):
+        self.gone = True
+
 
 class Channel:
     def __init__(self, cid, name):
@@ -253,7 +259,7 @@ class Channel:
         return SimpleNamespace(view_channel=True, send_messages=True, manage_webhooks=True, read_message_history=True)
 
     async def create_webhook(self, name, reason=None):
-        hook = Webhook(800 + len(self.hooks), self.id)
+        hook = Webhook(800 + len(self.hooks) + 100 * (self.id - 20), self.id)   # unique across channels, as on Discord
         self.hooks.append(hook)
         return hook
 
@@ -262,11 +268,13 @@ class Guild:
     def __init__(self):
         self.id = 10
         self.channel = Channel(20, "potent-potables")
+        self.film = Channel(21, "film-club")
+        self.channels = {20: self.channel, 21: self.film}
         self.me = SimpleNamespace(id=999)
         self.members = {1: SimpleNamespace(id=1, display_name="Boxer"), 2: SimpleNamespace(id=2, display_name="Shevek")}
 
     def get_channel(self, cid):
-        return self.channel if cid == self.channel.id else None
+        return self.channels.get(cid)
 
     def get_member(self, uid):
         return self.members.get(uid)
@@ -285,8 +293,8 @@ class Attachment:
         return self.data
 
 
-def discord_message(guild, mid, content, author=1, reply_to=None, attachments=(), webhook_id=None):
-    return SimpleNamespace(id=mid, guild=guild, channel=guild.channel, content=content,
+def discord_message(guild, mid, content, author=1, reply_to=None, attachments=(), webhook_id=None, channel=None):
+    return SimpleNamespace(id=mid, guild=guild, channel=channel or guild.channel, content=content,
                            author=guild.members.get(author, SimpleNamespace(id=author, display_name="?")),
                            mentions=[], stickers=[], attachments=list(attachments), webhook_id=webhook_id,
                            type=discord.MessageType.default,
@@ -316,9 +324,10 @@ async def mirror(tmp_path, hs):
     type(bot).guilds = property(lambda self: [guild])
 
     async def fetch_webhook(hid):
-        for h in guild.channel.hooks:
-            if h.id == hid:
-                return h
+        for c in guild.channels.values():
+            for h in c.hooks:
+                if h.id == hid:
+                    return h
         raise discord.NotFound(SimpleNamespace(status=404, reason="gone"), "gone")
     bot.fetch_webhook = fetch_webhook
     yield bot, cog, guild, hs
@@ -333,7 +342,7 @@ async def test_without_secrets_it_stays_off(tmp_path):
     from ursula.cogs.ansible import Ansible
     bot = Ursula(make_config(tmp_path))
     cog = Ansible(bot)
-    assert not cog.configured and "MATRIX_ACCESS_TOKEN" in cog.describe(SimpleNamespace())
+    assert not cog.configured and "MATRIX_ACCESS_TOKEN" in cog.describe([])
     ok, text = await cog.link(Guild(), Guild().channel, ROOM)
     assert not ok and "Exocomp" in text
 
@@ -346,11 +355,11 @@ async def test_linking(mirror):
     assert not ok and "Invite her" in text and ME in text
     ok, text = await cog.link(guild, guild.channel, "#potent-potables:magicalsamurai.com")
     assert ok and "potent-potables" in text and ME in text
-    s = await bot.db.get_settings(10)
-    assert (s.ansible_enabled, s.ansible_channel_id, s.ansible_webhook_id) == (1, 20, 800)
-    assert "on: <#20> ⇄ #potent-potables:magicalsamurai.com, as " + ME == cog.describe(s)
+    [b] = await bot.db.ansible_bridges(10)
+    assert (b.enabled, b.channel_id, b.webhook_id, b.room_id) == (1, 20, 800, ROOM)
+    assert "on: <#20> ⇄ #potent-potables:magicalsamurai.com, as " + ME == await cog.describe_guild(10)
     ok, _ = await cog.link(guild, guild.channel, ROOM)          # linking again reuses the webhook
-    assert ok and len(guild.channel.hooks) == 1
+    assert ok and len(guild.channel.hooks) == 1 and len(await bot.db.ansible_bridges(10)) == 1
     assert "off" in await cog.set_enabled(10, False)
 
 
@@ -473,7 +482,7 @@ async def test_a_refused_token_stops_the_loop(mirror):
     bot.wait_until_ready = ready
     await cog.run()                   # returns instead of retrying forever
     assert cog.stopped and "access token" in cog.problem
-    assert "Problem:" in cog.describe(await bot.db.get_settings(10))
+    assert "Problem:" in await cog.describe_guild(10)
 
 
 async def test_a_bad_event_never_blocks_the_rest(mirror):
@@ -517,7 +526,151 @@ async def test_one_room_one_server(mirror):
     bot, cog, guild, hs = mirror
     other = Guild()
     other.id = 11
-    await bot.db.update_settings(11, ansible_enabled=1, ansible_channel_id=20, ansible_room=ROOM)
+    await bot.db.ansible_add_bridge(11, 20, ROOM, ROOM, None, "2026-10-01T00:00:00+00:00")
     type(bot).guilds = property(lambda self: [guild, other])
     ok, text = await cog.link(guild, guild.channel, ROOM)
     assert not ok and "another server" in text
+
+
+# ------------------------------------------------------------ more than one channel (1.4.0)
+async def test_two_channels_two_rooms(mirror):
+    bot, cog, guild, hs = mirror
+    ok, _ = await cog.link(guild, guild.channel, ROOM)
+    ok2, text = await cog.link(guild, guild.film, ROOM2)
+    assert ok and ok2 and "now mirrors 2 channels" in text
+    pp, film = guild.channel.hooks[0], guild.film.hooks[0]
+    assert pp.id != film.id                         # each channel has its own webhook
+
+    # Discord to Matrix: each channel goes to its own room
+    await cog.on_message(discord_message(guild, 801, "to the potables"))
+    await cog.on_message(discord_message(guild, 802, "to the film club", channel=guild.film))
+    assert hs.sent["d801"]["room"] == ROOM and hs.sent["d802"]["room"] == ROOM2
+    # a webhook's own messages are never carried back, in either channel
+    await cog.on_message(discord_message(guild, 803, "echo", webhook_id=film.id, channel=guild.film))
+    await cog.on_message(discord_message(guild, 804, "echo", webhook_id=pp.id))
+    assert "d803" not in hs.sent and "d804" not in hs.sent
+
+    # Matrix to Discord: each room comes out in its own channel
+    await cog.sync_once(timeout_ms=0)
+    hs.batches.append({
+        ROOM: {"timeline": {"events": [matrix_event("$p", "@takver:anarres.org", {"msgtype": "m.text", "body": "cheers"})]}},
+        ROOM2: {"timeline": {"events": [matrix_event("$f", "@takver:anarres.org", {"msgtype": "m.text", "body": "popcorn"})]}},
+    })
+    await cog.sync_once(timeout_ms=0)
+    assert [m["content"] for m in pp.sent] == ["cheers"] and [m["content"] for m in film.sent] == ["popcorn"]
+    # a redaction in the film room deletes through the film webhook
+    hs.batches.append({ROOM2: {"timeline": {"events": [
+        matrix_event("$x", "@takver:anarres.org", {}, etype="m.room.redaction", redacts="$f")]}}})
+    await cog.sync_once(timeout_ms=0)
+    assert film.deleted == [film.sent[0]["id"]] and pp.deleted == []
+
+    status = await cog.describe_guild(10)
+    assert "<#20> ⇄ " + ROOM in status and "<#21> ⇄ " + ROOM2 in status and status.startswith("on: ")
+
+
+async def test_linking_another_channel_loses_nothing_in_the_first(mirror):
+    bot, cog, guild, hs = mirror
+    await cog.link(guild, guild.channel, ROOM)
+    await cog.sync_once(timeout_ms=0)               # finds "now"
+    await cog.sync_once(timeout_ms=0)
+    assert hs.sinces == [None, "s1"]
+    await cog.link(guild, guild.film, ROOM2)
+    # messages that arrived in the first room meanwhile still come across; the new room's backlog doesn't
+    hs.batches.append({
+        ROOM: {"timeline": {"events": [matrix_event("$1", "@takver:anarres.org", {"msgtype": "m.text", "body": "meanwhile"})]}},
+        ROOM2: {"timeline": {"events": [matrix_event("$old", "@takver:anarres.org", {"msgtype": "m.text", "body": "backlog"})]}},
+    })
+    await cog.sync_once(timeout_ms=0)
+    assert hs.sinces[-1] == "s2" and hs.full_states[-1]     # kept its place, and learned the new room's state
+    assert [m["content"] for m in guild.channel.hooks[0].sent] == ["meanwhile"]
+    assert guild.film.hooks[0].sent == []
+    hs.batches.append({ROOM2: {"timeline": {"events": [
+        matrix_event("$new", "@takver:anarres.org", {"msgtype": "m.text", "body": "fresh"})]}}})
+    await cog.sync_once(timeout_ms=0)
+    assert [m["content"] for m in guild.film.hooks[0].sent] == ["fresh"] and not hs.full_states[-1]
+
+
+async def test_one_room_one_channel_and_relinking_moves_it(mirror):
+    bot, cog, guild, hs = mirror
+    await cog.link(guild, guild.channel, ROOM)
+    ok, text = await cog.link(guild, guild.film, "#potent-potables:magicalsamurai.com")   # same room, by its alias
+    assert not ok and "already mirrored with <#20>" in text
+    ok, _ = await cog.link(guild, guild.channel, ROOM2)                                 # the channel moves rooms
+    [b] = await bot.db.ansible_bridges(10)
+    assert ok and (b.channel_id, b.room_id) == (20, ROOM2) and len(guild.channel.hooks) == 1
+    ok, _ = await cog.link(guild, guild.film, ROOM)                                      # so ROOM is free again
+    assert ok and len(await bot.db.ansible_bridges(10)) == 2
+
+
+async def test_switching_one_channel_off(mirror):
+    bot, cog, guild, hs = mirror
+    await cog.link(guild, guild.channel, ROOM)
+    await cog.link(guild, guild.film, ROOM2)
+    text = await cog.set_enabled(10, False, channel_id=21)
+    assert "<#21> ⇄ " + ROOM2 + " (off)" in text and text.startswith("The Ansible is on: ")
+    await cog.on_message(discord_message(guild, 901, "still on"))
+    await cog.on_message(discord_message(guild, 902, "quiet", channel=guild.film))
+    assert "d901" in hs.sent and "d902" not in hs.sent
+    assert "isn't mirrored" in await cog.set_enabled(10, True, channel_id=99)
+    assert (await cog.set_enabled(10, False)).startswith("The Ansible is off: ")   # no channel: all of them
+
+
+async def test_unlinking(mirror):
+    bot, cog, guild, hs = mirror
+    await cog.link(guild, guild.channel, ROOM)
+    await cog.link(guild, guild.film, ROOM2)
+    await cog.on_message(discord_message(guild, 950, "remembered", channel=guild.film))
+    ok, text = await cog.unlink(guild, channel_id=21)
+    assert ok and "Unlinked <#21>" in text and "1 other channel still mirrored" in text
+    assert getattr(guild.film.hooks[0], "gone", False)                  # its webhook is taken down
+    assert await bot.db.ansible_by_discord(10, 950) is None             # and which copy was which, forgotten
+    await cog.on_message(discord_message(guild, 951, "not any more", channel=guild.film))
+    assert "d951" not in hs.sent
+    ok, text = await cog.unlink(guild, room=ROOM)                       # by room, for a channel that's gone
+    assert ok and await bot.db.ansible_bridges(10) == []
+    ok, text = await cog.unlink(guild, channel_id=21)
+    assert not ok and "isn't mirrored" in text
+
+
+async def test_a_broken_bridge_never_blocks_the_others(mirror):
+    bot, cog, guild, hs = mirror
+    await cog.link(guild, guild.channel, ROOM)
+    # a bridge whose room Ursula was never let into (e.g. she was kicked), and one whose channel was deleted
+    await bot.db.ansible_add_bridge(10, 21, "!private:magicalsamurai.com", "!private:magicalsamurai.com", None,
+                                    "2026-10-01T00:00:00+00:00")
+    await bot.db.ansible_add_bridge(10, 404, "!gone:magicalsamurai.com", "!gone:magicalsamurai.com", None,
+                                    "2026-10-01T00:00:00+00:00")
+    await cog.sync_once(timeout_ms=0)
+    hs.batches.append({ROOM: {"timeline": {"events": [
+        matrix_event("$1", "@takver:anarres.org", {"msgtype": "m.text", "body": "still here"})]}}})
+    await cog.sync_once(timeout_ms=0)
+    assert [m["content"] for m in guild.channel.hooks[0].sent] == ["still here"]
+    status = await cog.describe_guild(10)
+    assert "skipped: Ursula isn't invited to the room" in status and "channel is gone" in status
+
+
+async def test_the_old_single_link_moves_into_a_bridge(tmp_path):
+    """A database from before 1.4.0 keeps its one link, now as the first bridge."""
+    from ursula.db import MIGRATIONS, Database
+    db = Database(str(tmp_path / "old.db"))
+    await db.connect()
+    try:
+        await db.conn.execute("DELETE FROM schema_version WHERE version = ?", (len(MIGRATIONS),))
+        await db.conn.executescript("DROP INDEX ansible_bridges_room; DROP TABLE ansible_bridges;"
+                                    "ALTER TABLE ansible_links DROP COLUMN channel_id;")
+        await db.update_settings(10, ansible_enabled=1, ansible_channel_id=20, ansible_room=f" {ROOM} ",
+                                 ansible_webhook_id=800)
+        await db.update_settings(11, ansible_enabled=0, ansible_channel_id=30,
+                                 ansible_room="#potent-potables:magicalsamurai.com")
+        await db.update_settings(12)                        # never linked: no bridge
+        await db.conn.execute("INSERT INTO ansible_links (guild_id, discord_id, matrix_event, origin, created_at) "
+                              "VALUES (10, 7000, '$ev', 'matrix', '2026-10-01')")
+        await db.conn.commit()
+        assert await db.migrate() == len(MIGRATIONS)
+        a, b = await db.ansible_bridges()
+        assert (a.guild_id, a.channel_id, a.room, a.room_id, a.webhook_id, a.enabled) == (10, 20, ROOM, ROOM, 800, 1)
+        assert (b.guild_id, b.room, b.room_id, b.enabled) == (11, "#potent-potables:magicalsamurai.com", None, 0)
+        row = await (await db.conn.execute("SELECT channel_id FROM ansible_links WHERE matrix_event = '$ev'")).fetchone()
+        assert row[0] == 20
+    finally:
+        await db.close()

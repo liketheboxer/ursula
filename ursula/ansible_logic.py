@@ -1,7 +1,7 @@
 """The Ansible's translations between a Discord message and a Matrix event (no I/O, so it's easy to test).
 
-Named for Le Guin's ansible, the instant link Shevek's theory makes possible: here it carries one Discord
-channel to one Matrix room and back.
+Named for Le Guin's ansible, the instant link Shevek's theory makes possible: here it carries Discord
+channels to Matrix rooms and back, each channel to its own room.
 """
 from __future__ import annotations
 

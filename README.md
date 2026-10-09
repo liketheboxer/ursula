@@ -11,7 +11,7 @@ A Python Discord bot (discord.py 2.x) that runs under Exocomp and reports teleme
 | **Postings** (`/postings`) | Polished pages: rules, a welcome guide | Notice Board |
 | **Syndicates** (`/syndicate`) | Role menus members pick from | Role menus (Colours) |
 | **Salas** (`/play`, `/salas`) | Music in voice channels | Jukebox |
-| **The Ansible** (`/pdc ansible`) | One channel mirrored to a Matrix room, both ways | new |
+| **The Ansible** (`/pdc ansible`) | Channels mirrored to Matrix rooms, both ways, each to its own room | new |
 | **The PDC** (`/pdc`) | Settings: Production and Distribution Coordination | Admin |
 | **The Analogy** | The manual, in Daisho | Manual |
 
@@ -23,7 +23,7 @@ Inside the code the PlunderBot names stay (a gathering is a `Voyage`, a custom a
 |---|---|---|
 | `/ursula` | Everyone | Meet Ursula: the version, and an aphorism |
 | `/timezone set` | Everyone | Save your time zone (Pacific, ET, Europe/London…) so the times you type are read correctly. Also `show` and `clear` |
-| `/gathering call` | Everyone | Call a gathering: title, date (friday, tomorrow, 10/3), time (8pm, or 8pm ET), **place** (a voice channel, an address, a link), an optional **role** to tag (only roles the server lets anyone mention), places (empty for no limit), details, reminders (default 1 day and 1 hour before), repeat and its last date, length (default 2 hours), a picture, and when to tag the role |
+| `/gathering call` | Everyone | Call a gathering: title, date (friday, tomorrow, 10/3), time (8pm, or 8pm ET), **place** (a voice channel, an address, a link), an optional **role** to tag (only roles the server lets anyone mention), places (empty for no limit), details, reminders (default 1 day and 1 hour before), repeat and its last date, length (default 2 hours), a picture, when to tag the role, and `lobby`: when its lobby thread opens (the server's default, none, or 15 minutes to a day before) |
 | `/gathering edit` | Whoever called it, or mods | Change any of that, including place and role (`remove_role` stops tagging); for a repeating gathering, how it repeats, its last date, and skip or unskip a date |
 | `/gathering series` | Everyone | A repeating gathering's coming dates |
 | `/gathering cancel` | Whoever called it, or mods | Call it off, or with `whole_series:True` the whole series |
@@ -36,10 +36,14 @@ Inside the code the PlunderBot names stay (a gathering is a `Voyage`, a custom a
 | `/pdc settings` | Manage Server | This server's settings, including the Ansible's state |
 | `/pdc timezone` | Manage Server | The server's time zone |
 | `/pdc gatherings channel` | Manage Server | Where gathering cards go (empty: wherever `/gathering call` is used) |
+| `/pdc gatherings lobby` | Manage Server | When each gathering's lobby thread opens (default 1 hour before; Off for none). Each gathering can pick its own |
 | `/pdc regions auto` | Manage Server | Match region roles to time zones. Also `set`, `clear`, `list` |
 | `/pdc salas status` | Manage Server | How music is set up. Also `enable`, `youtube`, `djrole`, `channel`, `settings` |
 | `/pdc status set` | Manage Server | The line under Ursula's name, how it's worded (Playing, Listening to...) and her dot. Also `music` (Now Playing: song while Salas plays; on by default) and `show` |
-| `/pdc ansible link` | Manage Server | Mirror a channel and a Matrix room, and switch it on. Also `enable` (on/off, the link is kept) and `status` |
+| `/pdc ansible link` | Manage Server | Mirror a channel and a Matrix room, and switch it on. Run it again for each channel you want mirrored; linking a channel that's already mirrored moves it to the new room |
+| `/pdc ansible unlink` | Manage Server | Stop mirroring a channel (pick the channel, or type the room if the channel's been deleted). Its webhook is removed; Ursula stays in the Matrix room |
+| `/pdc ansible enable` | Manage Server | Switch mirroring on or off, for one channel or (with no channel) all of them. The links are kept |
+| `/pdc ansible status` | Manage Server | Every mirrored channel and room, which are on, and anything wrong |
 
 ### How Gatherings work
 
@@ -50,10 +54,11 @@ Inside the code the PlunderBot names stay (a gathering is a `Voyage`, a custom a
 
 ### How the Ansible works
 
-- One Discord channel and one Matrix room (for Anarres: #potent-potables and `!oDGEuyxATmlQSlftFv:magicalsamurai.com`).
+- Any number of **bridges**, each one Discord channel and one Matrix room (for Anarres: #potent-potables and `!oDGEuyxATmlQSlftFv:magicalsamurai.com`, and whatever else you link). Each channel has its own webhook and can be switched off on its own. A room is only ever in one bridge, so a Matrix message always has exactly one place to go.
 - **Discord to Matrix:** Ursula's Matrix account (`@ursula:magicalsamurai.com`) posts **Name**: text. Mentions, custom emoji and timestamps are written out as words. Files up to 8 MB go across as Matrix files; bigger ones are named. Replies point at the right message, edits become Matrix edits, and deleting on Discord redacts it on Matrix.
 - **Matrix to Discord:** a webhook in the channel posts under the Matrix member's display name, with every mention switched off (nobody on Matrix can ping @everyone or a role). Pictures and files up to 8 MB are carried. Replies show a link to the message they answer; edits and redactions follow.
-- Only new messages are carried: linking (or changing the room) starts from now, and after downtime messages older than 6 hours are left. Ursula ignores her own Matrix messages and her webhook's Discord ones, so nothing loops. Which copy is which is kept for 30 days.
+- Only new messages are carried: linking (or changing the room) starts from now, and after downtime messages older than 6 hours are left. Linking another channel doesn't interrupt the ones already mirrored.
+- A bridge that can't work (Ursula was removed from its room, its channel was deleted) is skipped and shown in `/pdc ansible status`; the others carry on. Ursula ignores her own Matrix messages and her webhook's Discord ones, so nothing loops. Which copy is which is kept for 30 days.
 - A Matrix member's message deleted on Discord is redacted on Matrix only if Ursula is a moderator in the room; otherwise it stays there.
 - **Encrypted rooms** work: Ursula has her own Matrix device and keeps its keys in `/data/matrix` (keep the data volume across refits; losing it means a new Matrix login and token). Element shows her device as unverified; that's expected, and messages still reach her. She can't read anything sent before her device existed. A message whose key is late waits up to 10 minutes before it's given up on.
 - Not carried (yet): reactions, threads, and Discord embeds (the link inside them is carried).
@@ -69,7 +74,7 @@ The same as PlunderBot's music: SoundCloud, Bandcamp, Twitch, radio, plain audio
 
 ### How the Daisho screens work
 
-Ursula's module in The Magical Samurai shows Settings (with the Ansible), Syndicates, Customs, Postings, Gatherings and Salas. Ursula keeps her own data and sends Daisho a copy; changes made there are applied within about 15 seconds with the same checks as the slash commands. Members can sign in, call gatherings and answer them as themselves. Linking the Ansible from the screens goes through the same steps as `/pdc ansible link`.
+Ursula's module in The Magical Samurai shows Settings (with the Ansible), Syndicates, Customs, Postings, Gatherings and Salas. Ursula keeps her own data and sends Daisho a copy; changes made there are applied within about 15 seconds with the same checks as the slash commands. Members can sign in, call gatherings and answer them as themselves. Linking the Ansible from the screens goes through the same steps as `/pdc ansible link`. The Settings screen's one Ansible channel and room are the first bridge; the snapshot's `settings.ansible_bridges` lists them all, and the changes `ansible.link` (`channel_id`, `room`, optional `id` to move one), `ansible.unlink` (`id`) and `ansible.enable` (`on`, optional `id`) manage the rest.
 
 ## Setting it up
 
@@ -78,7 +83,7 @@ Ursula's module in The Magical Samurai shows Settings (with the Ansible), Syndic
 1. In the [Discord Developer Portal](https://discord.com/developers/applications), create an application named **Ursula** and give her an avatar.
 2. **Bot** tab: turn on **Server Members Intent** and **Message Content Intent** (Customs, imports and the Ansible need it). Leave Presence off.
 3. **Bot** tab: **Reset Token** and keep it for Exocomp. Never paste it in chat or commit it.
-4. **OAuth2 › URL Generator**: scopes `bot` and `applications.commands`; permissions **View Channels**, **Send Messages**, **Embed Links**, **Attach Files**, **Read Message History**, **Add Reactions**, **Manage Roles**, **Manage Events**, **Manage Webhooks** (the Ansible), **Manage Messages** (customs that pin), **Connect** and **Speak** (Salas). Open the URL and add Ursula to Anarres.
+4. **OAuth2 › URL Generator**: scopes `bot` and `applications.commands`; permissions **View Channels**, **Send Messages**, **Embed Links**, **Attach Files**, **Read Message History**, **Add Reactions**, **Manage Roles**, **Manage Events**, **Manage Webhooks** (the Ansible), **Manage Messages** (customs that pin), **Create Public Threads** and **Send Messages in Threads** (lobby threads), **Connect** and **Speak** (Salas). Open the URL and add Ursula to Anarres.
 5. **Server Settings › Roles**: drag Ursula's role above any role she should hand out (Syndicates and Customs).
 
 ### 2. Ursula's Matrix account
@@ -110,12 +115,13 @@ The database is `/data/ursula.db`; the container runs as user 10001 (`ursula`).
 /pdc timezone America/Los_Angeles
 /pdc gatherings channel #gatherings
 /pdc ansible link channel:#potent-potables room:!oDGEuyxATmlQSlftFv:magicalsamurai.com
+/pdc ansible link channel:#another-channel room:#another-room:magicalsamurai.com   (as many as you like)
 /pdc settings
 ```
 
 ## Telemetry
 
-Gauges `voyages_scheduled` and `ansible_up` (1 while the mirror is syncing). Background errors are reported as `voyage-clock`, `articles-clock`, `ansible` and `daisho`.
+Gauges `voyages_scheduled`, `ansible_up` (1 while the mirror is syncing) and `ansible_bridges` (how many channels are being mirrored). Background errors are reported as `voyage-clock`, `articles-clock`, `ansible` and `daisho`.
 
 ## Developing
 

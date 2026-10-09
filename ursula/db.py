@@ -454,6 +454,38 @@ MIGRATIONS: list[str] = [
     ALTER TABLE guild_settings ADD COLUMN presence_text TEXT;
     ALTER TABLE guild_settings ADD COLUMN presence_music INTEGER NOT NULL DEFAULT 1;
     """,
+    # Ursula 1.3.0: the lobby thread, opened a while before the start (the server's default, or the event's own)
+    """
+    ALTER TABLE voyages ADD COLUMN lobby_minutes INTEGER;
+    ALTER TABLE voyages ADD COLUMN lobby_thread_id INTEGER;
+    ALTER TABLE voyages ADD COLUMN lobby_state TEXT NOT NULL DEFAULT '';
+    ALTER TABLE guild_settings ADD COLUMN lobby_minutes INTEGER NOT NULL DEFAULT 60;
+    """,
+    # Ursula 1.4.0: the Ansible mirrors any number of channels, each to its own Matrix room. The one link
+    # in guild_settings moves here (its old columns stay, unused, since migrations are append-only).
+    """
+    CREATE TABLE ansible_bridges (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        guild_id INTEGER NOT NULL,
+        channel_id INTEGER NOT NULL,
+        room TEXT NOT NULL,               -- the room as the PDC typed it (an ID or an alias)
+        room_id TEXT,                     -- its ID, once resolved (one room is only ever in one bridge)
+        webhook_id INTEGER,               -- the webhook Matrix messages post through, in this channel
+        enabled INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL,
+        UNIQUE (guild_id, channel_id)
+    );
+    CREATE UNIQUE INDEX ansible_bridges_room ON ansible_bridges (room_id) WHERE room_id IS NOT NULL;
+    INSERT INTO ansible_bridges (guild_id, channel_id, room, room_id, webhook_id, enabled, created_at)
+        SELECT guild_id, ansible_channel_id, trim(ansible_room),
+               CASE WHEN substr(trim(ansible_room), 1, 1) = '!' THEN trim(ansible_room) END,
+               ansible_webhook_id, ansible_enabled, strftime('%Y-%m-%dT%H:%M:%S+00:00', 'now')
+        FROM guild_settings
+        WHERE ansible_channel_id IS NOT NULL AND ansible_room IS NOT NULL AND trim(ansible_room) != '';
+    ALTER TABLE ansible_links ADD COLUMN channel_id INTEGER;
+    UPDATE ansible_links SET channel_id =
+        (SELECT ansible_channel_id FROM guild_settings g WHERE g.guild_id = ansible_links.guild_id);
+    """,
 ]
 
 
@@ -499,6 +531,7 @@ class GuildSettings:
     music_idle_minutes: int = 5
     music_volume: int = 60
     music_stay: int = 0
+    # The Ansible's one link before 1.4.0. Nothing reads these now: the links live in ansible_bridges.
     ansible_enabled: int = 0
     ansible_channel_id: int | None = None
     ansible_room: str | None = None
@@ -507,6 +540,7 @@ class GuildSettings:
     presence_kind: str = "custom"
     presence_text: str | None = None
     presence_music: int = 1
+    lobby_minutes: int = 60          # the lobby thread opens this long before an event (0: no lobby)
 
 
 @dataclass
@@ -575,7 +609,7 @@ class Boarding:
     reminded_at: str | None = None
 
 
-_SETTING_COLUMNS = {"presence_status", "presence_kind", "presence_text", "presence_music", "ansible_enabled", "ansible_channel_id", "ansible_room", "ansible_webhook_id", "ledger_reminders", "music_enabled", "music_youtube", "music_dj_role_id", "music_channel_id",
+_SETTING_COLUMNS = {"lobby_minutes", "presence_status", "presence_kind", "presence_text", "presence_music", "ansible_enabled", "ansible_channel_id", "ansible_room", "ansible_webhook_id", "ledger_reminders", "music_enabled", "music_youtube", "music_dj_role_id", "music_channel_id",
                     "music_idle_minutes", "music_volume", "music_stay", "parley_enabled", "parley_budget_cents", "parley_daily", "parley_kagi_daily",
                     "shipslog_channel_id", "shipslog_weekday", "shipslog_hour", "shipslog_last",
                     "crowsnest_enabled", "forum_channel_id", "gangplank_enabled", "intro_channel_id", "pending_role_id", "harbormaster_role_id",
@@ -612,6 +646,9 @@ class Voyage:
     ping_role: str = "posted"  # off | posted | reminders: when the game's ping role is tagged
     repeat_until: str | None = None  # the last local date a repeating series runs to (YYYY-MM-DD)
     skips: str = ""                  # local dates the series skips, comma separated
+    lobby_minutes: int | None = None  # when its lobby thread opens; None: the server's default, 0: none
+    lobby_thread_id: int | None = None
+    lobby_state: str = ""            # "" not yet, opening, open, failed (reminded in the channel instead), closed
     place: str | None = None         # Ursula: where it happens ("General Gaming voice", an address, a link)
     notify_role_id: int | None = None   # Ursula: the role tagged (when ping_role says), instead of a game's
 
@@ -627,7 +664,8 @@ class Voyage:
 _VOYAGE_COLUMNS = {"channel_id", "message_id", "title", "description", "game_key", "size_label", "capacity",
                    "starts_at", "duration_min", "reminders", "reminders_sent", "repeat", "series_id", "status",
                    "event_id", "crew_id", "image", "ping_role", "repeat_until", "skips", "place",
-                   "notify_role_id"}
+                   "notify_role_id",
+                   "lobby_minutes", "lobby_thread_id", "lobby_state"}
 
 
 @dataclass
@@ -1678,11 +1716,87 @@ class Database:
 
 
 # ================================================================ the Ansible (Ursula 1.0.0)
+@dataclass
+class AnsibleBridge:
+    """One Discord channel mirrored to one Matrix room (1.4.0: a server can have any number)."""
+    id: int
+    guild_id: int
+    channel_id: int
+    room: str                       # as the PDC typed it
+    room_id: str | None             # resolved; None until the first time it's looked up
+    webhook_id: int | None
+    enabled: int
+    created_at: str
+
+
+_BRIDGE_COLUMNS = {"channel_id", "room", "room_id", "webhook_id", "enabled"}
+
+
+async def _ansible_bridges(self, guild_id: int | None = None) -> list[AnsibleBridge]:
+    """Every bridge, or one server's, oldest first."""
+    if guild_id is None:
+        rows = await (await self.conn.execute("SELECT * FROM ansible_bridges ORDER BY id")).fetchall()
+    else:
+        rows = await (await self.conn.execute(
+            "SELECT * FROM ansible_bridges WHERE guild_id = ? ORDER BY id", (guild_id,))).fetchall()
+    return [AnsibleBridge(**{k: r[k] for k in r.keys()}) for r in rows]
+
+
+async def _ansible_bridge(self, bridge_id: int) -> AnsibleBridge | None:
+    r = await (await self.conn.execute("SELECT * FROM ansible_bridges WHERE id = ?", (bridge_id,))).fetchone()
+    return AnsibleBridge(**{k: r[k] for k in r.keys()}) if r else None
+
+
+async def _ansible_bridge_for(self, guild_id: int, channel_id: int) -> AnsibleBridge | None:
+    r = await (await self.conn.execute("SELECT * FROM ansible_bridges WHERE guild_id = ? AND channel_id = ?",
+                                       (guild_id, channel_id))).fetchone()
+    return AnsibleBridge(**{k: r[k] for k in r.keys()}) if r else None
+
+
+async def _ansible_add_bridge(self, guild_id: int, channel_id: int, room: str, room_id: str | None,
+                              webhook_id: int | None, when: str, enabled: int = 1) -> AnsibleBridge:
+    cur = await self.conn.execute(
+        "INSERT INTO ansible_bridges (guild_id, channel_id, room, room_id, webhook_id, enabled, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)", (guild_id, channel_id, room, room_id, webhook_id, enabled, when))
+    await self.conn.commit()
+    return await self.ansible_bridge(cur.lastrowid)
+
+
+async def _ansible_update_bridge(self, bridge_id: int, **values) -> AnsibleBridge | None:
+    bad = set(values) - _BRIDGE_COLUMNS
+    if bad:
+        raise ValueError(f"Unknown bridge fields: {', '.join(sorted(bad))}")
+    if values:
+        cols = ", ".join(f"{k} = ?" for k in values)
+        await self.conn.execute(f"UPDATE ansible_bridges SET {cols} WHERE id = ?", (*values.values(), bridge_id))
+        await self.conn.commit()
+    return await self.ansible_bridge(bridge_id)
+
+
+async def _ansible_delete_bridge(self, bridge_id: int) -> None:
+    """Remove a bridge, and which copy was which in its channel (so a room linked again later can't edit or
+    delete messages through a webhook that's gone)."""
+    b = await self.ansible_bridge(bridge_id)
+    if b is None:
+        return
+    await self.conn.execute("DELETE FROM ansible_links WHERE guild_id = ? AND channel_id = ?",
+                            (b.guild_id, b.channel_id))
+    await self.conn.execute("DELETE FROM ansible_bridges WHERE id = ?", (bridge_id,))
+    await self.conn.commit()
+
+
+async def _ansible_forget_channel(self, guild_id: int, channel_id: int) -> None:
+    """Forget which copy was which in a channel that's no longer mirrored."""
+    await self.conn.execute("DELETE FROM ansible_links WHERE guild_id = ? AND channel_id = ?", (guild_id, channel_id))
+    await self.conn.commit()
+
+
 async def _ansible_link(self, guild_id: int, discord_id: int, matrix_event: str, origin: str, when: str,
-                        part: int = 0, sender: str | None = None) -> None:
+                        part: int = 0, sender: str | None = None, channel_id: int | None = None) -> None:
     await self.conn.execute(
         "INSERT OR REPLACE INTO ansible_links (guild_id, discord_id, matrix_event, part, matrix_sender, origin, "
-        "created_at) VALUES (?, ?, ?, ?, ?, ?, ?)", (guild_id, discord_id, matrix_event, part, sender, origin, when))
+        "created_at, channel_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (guild_id, discord_id, matrix_event, part, sender, origin, when, channel_id))
     await self.conn.commit()
 
 
@@ -1735,6 +1849,13 @@ async def _state_set(self, key: str, value: str | None) -> None:
     await self.conn.commit()
 
 
+Database.ansible_bridges = _ansible_bridges
+Database.ansible_bridge = _ansible_bridge
+Database.ansible_bridge_for = _ansible_bridge_for
+Database.ansible_add_bridge = _ansible_add_bridge
+Database.ansible_update_bridge = _ansible_update_bridge
+Database.ansible_delete_bridge = _ansible_delete_bridge
+Database.ansible_forget_channel = _ansible_forget_channel
 Database.ansible_link = _ansible_link
 Database.ansible_by_discord = _ansible_by_discord
 Database.ansible_by_event = _ansible_by_event

@@ -105,6 +105,7 @@ async def test_edit_swaps_and_removes_the_picture(env):
 
 # ------------------------------------------------------------ tagging the role
 async def test_notify_choices(env):
+    from tests.test_voyages import planned_days_ago
     bot, cog, guild, text = env
     from tests.test_voyages import organizer
     film = guild.roles[50]
@@ -116,6 +117,7 @@ async def test_notify_choices(env):
     assert "<@&50>" in text.sent[-1][0]
     default = [v for v in await bot.db.voyages_with_status("scheduled") if v.title == "Default"][0]
     starts = datetime.fromisoformat(default.starts_at)
+    await planned_days_ago(bot, default)
     await cog.on_button(interaction_for(guild, 4), "aboard", default.id)
     await cog.tick(guild, default.id, starts - timedelta(hours=23))
     assert "<@4>" in text.sent[-1][0] and "<@&50>" not in text.sent[-1][0]
@@ -124,6 +126,7 @@ async def test_notify_choices(env):
                       notify=SimpleNamespace(value="reminders", name="r"))
     loud = [v for v in await bot.db.voyages_with_status("scheduled") if v.title == "Loud"][0]
     starts = datetime.fromisoformat(loud.starts_at)
+    await planned_days_ago(bot, loud)
     await cog.tick(guild, loud.id, starts - timedelta(hours=23))
     content, kw = text.sent[-1]
     assert content.startswith("<@&50>") and kw["allowed_mentions"].roles == [film]

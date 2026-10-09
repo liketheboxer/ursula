@@ -15,7 +15,7 @@ from discord.ext import commands
 from .. import presence_logic as PL
 from ..timeutil import valid_timezone
 from ..region_logic import guess_zone
-from ..voyage_logic import zone_from_name
+from ..voyage_logic import LOBBY_CHOICES, format_lobby, zone_from_name
 
 _ZONES = sorted(available_timezones())
 
@@ -26,7 +26,7 @@ class Admin(commands.GroupCog, group_name="pdc", group_description="Ursula's set
     gatherings = app_commands.Group(name="gatherings", description="Gathering settings")
     regions = app_commands.Group(name="regions", description="Region roles that set members' time zones")
     music = app_commands.Group(name="salas", description="Salas: music in voice channels")
-    ansible = app_commands.Group(name="ansible", description="The Ansible: mirror a channel to a Matrix room")
+    ansible = app_commands.Group(name="ansible", description="The Ansible: mirror channels to Matrix rooms")
     status = app_commands.Group(name="status", description="What shows under Ursula's name in Discord")
 
     def __init__(self, bot):
@@ -44,7 +44,7 @@ class Admin(commands.GroupCog, group_name="pdc", group_description="Ursula's set
             f"Time zone: {tz}\n"
             f"Gathering cards: {f'<#{s.voyage_channel_id}>' if s.voyage_channel_id else 'wherever /gathering call is used'}\n"
             f"Salas (music): {'on' if s.music_enabled else 'off'}\n"
-            f"The Ansible: {ansible.describe(s) if ansible else 'not running'}"
+            f"The Ansible: {await ansible.describe_guild(interaction.guild_id) if ansible else 'not running'}"
         )
         await interaction.response.send_message(text, ephemeral=True,
                                                 allowed_mentions=discord.AllowedMentions.none())
@@ -66,6 +66,20 @@ class Admin(commands.GroupCog, group_name="pdc", group_description="Ursula's set
         return [app_commands.Choice(name=z, value=z) for z in matches]
 
     # ------------------------------------------------------------ gatherings
+    @gatherings.command(name="lobby", description="When the lobby thread opens before each gathering (each can change it)")
+    @app_commands.describe(when="How long before the start; Off for no lobby threads")
+    @app_commands.choices(when=[app_commands.Choice(name="Off", value=0)] + [
+        app_commands.Choice(name=format_lobby(m), value=m) for m in LOBBY_CHOICES])
+    async def gatherings_lobby(self, interaction: discord.Interaction, when: app_commands.Choice[int]) -> None:
+        await self.bot.db.update_settings(interaction.guild_id, lobby_minutes=when.value)
+        if when.value:
+            text = (f"Lobby threads open {format_lobby(when.value)} each gathering (unless it has its own time): "
+                    "everyone Going or Maybe is tagged in, and it takes the place of the reminder due then. "
+                    "I need Create Public Threads and Send Messages in Threads in the gathering channel.")
+        else:
+            text = "No lobby threads, unless a gathering asks for one itself. Reminders go out as before."
+        await interaction.response.send_message(text, ephemeral=True)
+
     @gatherings.command(name="channel", description="Where gathering cards are posted (leave empty: wherever it's called)")
     async def gatherings_channel(self, interaction: discord.Interaction,
                               channel: discord.TextChannel | None = None) -> None:
@@ -247,8 +261,9 @@ class Admin(commands.GroupCog, group_name="pdc", group_description="Ursula's set
             f"24/7 {'on' if s.music_stay else 'off'}.", ephemeral=True)
 
     # ------------------------------------------------------------ the Ansible (Matrix mirror)
-    @ansible.command(name="link", description="Mirror a channel and a Matrix room both ways, and switch it on")
-    @app_commands.describe(channel="The Discord channel", room="The Matrix room: !abc123:server or #name:server")
+    @ansible.command(name="link", description="Mirror a channel and a Matrix room both ways (add as many as you like)")
+    @app_commands.describe(channel="The Discord channel (one already mirrored moves to this room)",
+                           room="The Matrix room: !abc123:server or #name:server")
     async def ansible_link(self, interaction: discord.Interaction, channel: discord.TextChannel,
                            room: app_commands.Range[str, 3, 255]) -> None:
         cog = self.bot.get_cog("Ansible")
@@ -259,22 +274,42 @@ class Admin(commands.GroupCog, group_name="pdc", group_description="Ursula's set
         _, text = await cog.link(interaction.guild, channel, room)
         await interaction.followup.send(text, ephemeral=True)
 
-    @ansible.command(name="enable", description="Switch the mirror on or off (the link is kept)")
-    async def ansible_enable(self, interaction: discord.Interaction, on: bool) -> None:
+    @ansible.command(name="unlink", description="Stop mirroring a channel (its webhook is removed)")
+    @app_commands.describe(channel="The mirrored Discord channel",
+                           room="Or the Matrix room, e.g. when the channel has been deleted")
+    async def ansible_unlink(self, interaction: discord.Interaction, channel: discord.TextChannel | None = None,
+                             room: str | None = None) -> None:
         cog = self.bot.get_cog("Ansible")
         if cog is None:
             await interaction.response.send_message("The Ansible isn't running.", ephemeral=True)
             return
-        await interaction.response.send_message(await cog.set_enabled(interaction.guild_id, on), ephemeral=True)
+        if channel is None and not room:
+            await interaction.response.send_message("Pick the channel (or type the room) to unlink.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        _, text = await cog.unlink(interaction.guild, channel_id=channel.id if channel else None, room=room)
+        await interaction.followup.send(text, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
 
-    @ansible.command(name="status", description="What the Ansible is mirroring, and whether it's working")
+    @ansible.command(name="enable", description="Switch mirroring on or off (the links are kept)")
+    @app_commands.describe(on="On or off", channel="Just this channel (leave empty for every mirrored channel)")
+    async def ansible_enable(self, interaction: discord.Interaction, on: bool,
+                             channel: discord.TextChannel | None = None) -> None:
+        cog = self.bot.get_cog("Ansible")
+        if cog is None:
+            await interaction.response.send_message("The Ansible isn't running.", ephemeral=True)
+            return
+        await interaction.response.send_message(
+            await cog.set_enabled(interaction.guild_id, on, channel.id if channel else None), ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none())
+
+    @ansible.command(name="status", description="Which channels the Ansible mirrors, and whether it's working")
     async def ansible_status(self, interaction: discord.Interaction) -> None:
         cog = self.bot.get_cog("Ansible")
-        s = await self.bot.db.get_settings(interaction.guild_id)
-        text = f"The Ansible: {cog.describe(s)}" if cog else "The Ansible isn't running."
+        text = f"The Ansible: {await cog.describe_guild(interaction.guild_id)}" if cog else "The Ansible isn't running."
         if cog and cog.configured:
             text += f"\nMessages carried since Ursula last started: {cog.carried}."
-        await interaction.response.send_message(text, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+        await interaction.response.send_message(text[:2000], ephemeral=True,
+                                                allowed_mentions=discord.AllowedMentions.none())
 
     # ------------------------------------------------------------ the status under the name
     async def _status_reply(self, interaction: discord.Interaction, lead: str) -> None:

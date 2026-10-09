@@ -147,6 +147,29 @@ LINES: dict[str, list[str]] = {
     "voyage_cancelled": [
         "{cuss} **{title}** has been called off. Sorry, {names}.",
     ],
+    # the lobby thread (1.3.0)
+    "lobby_open": [
+        "The lobby for **{title}** is open; it starts {when}. Rides, snacks, who's running late: sort it out "
+        "here, together. Changed your mind? The buttons below still work.",
+        "**{title}** starts {when}, and this is its lobby. Last-minute plans go here, not in the main "
+        "channel. The buttons below change your answer.",
+    ],
+    "lobby_ping": [
+        "{names}: **{title}** starts {when}.",
+        "{names}, a gentle nudge: **{title}** starts {when}. Nobody's obliged, but you said you'd come.",
+    ],
+    "lobby_maybes": [
+        "{names}: you're a maybe. Are you coming? Tap **Going** or **Can't make it** above, so the others know.",
+    ],
+    "lobby_role": [
+        "{role}: **{title}** starts {when}. Its lobby is open in {thread}.",
+    ],
+    "lobby_moved": [
+        "A change: **{title}** now starts {when}.",
+    ],
+    "lobby_over": [
+        "**{title}** is over. Closing the lobby. Thank you for coming.",
+    ],
     "voyage_cancel_done": [
         "Called off, and everyone who'd answered has been told.",
     ],

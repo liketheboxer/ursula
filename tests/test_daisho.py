@@ -217,12 +217,15 @@ async def test_the_ansible_is_linked_from_the_screens_as_from_discord(env):
     ansible = bot.get_cog("Ansible")
     calls = []
 
-    async def fake_link(g, channel, room):
-        calls.append((channel.id, room))
+    async def fake_link(g, channel, room, replace=None):
+        calls.append((channel.id, room, replace))
         if room.startswith("#nope"):
             return False, "Matrix doesn't know the room #nope:example.org."
-        await bot.db.update_settings(10, ansible_enabled=1, ansible_channel_id=channel.id, ansible_room=room,
-                                     ansible_webhook_id=77)
+        b = await bot.db.ansible_bridge(replace) if replace else await bot.db.ansible_bridge_for(10, channel.id)
+        if b is None:
+            await bot.db.ansible_add_bridge(10, channel.id, room, room, 77, "2026-10-01T00:00:00+00:00")
+        else:
+            await bot.db.ansible_update_bridge(b.id, channel_id=channel.id, room=room, room_id=room, enabled=1)
         return True, f"The Ansible is on: <#{channel.id}> ⇄ {room}."
     ansible.link = fake_link
     res = await run(cog, guild, ("settings", "settings.update",
@@ -231,11 +234,54 @@ async def test_the_ansible_is_linked_from_the_screens_as_from_discord(env):
                      {"fields": {"ansible_channel_id": 20, "ansible_room": "!oDGEuyxATmlQSlftFv:magicalsamurai.com"}}))
     assert [r[1] for r in res] == ["failed", "applied"] and "doesn't know" in res[0][2]
     assert "#potent-potables" in res[1][2] and "<#" not in res[1][2]
-    s = await bot.db.get_settings(10)
-    assert (s.ansible_enabled, s.ansible_channel_id, s.ansible_room) == (1, 20, "!oDGEuyxATmlQSlftFv:magicalsamurai.com")
+    [b] = await bot.db.ansible_bridges(10)
+    assert (b.enabled, b.channel_id, b.room) == (1, 20, "!oDGEuyxATmlQSlftFv:magicalsamurai.com")
+    settings = cog.client.snapshots[-1]["settings"]
+    assert (settings["ansible_enabled"], settings["ansible_channel_id"]) == (1, 20)
+    assert [x["channel"] for x in settings["ansible_bridges"]] == ["potent-potables"]
     res = await run(cog, guild, ("settings", "settings.update", {"fields": {"ansible_enabled": 0}}))
-    assert res[0][1] == "applied" and not (await bot.db.get_settings(10)).ansible_enabled
+    assert res[0][1] == "applied" and not (await bot.db.ansible_bridges(10))[0].enabled
     assert len(calls) == 2          # switching it off didn't relink
+    # a new room on the old screen moves the first bridge; it never adds a second
+    res = await run(cog, guild, ("settings", "settings.update", {"fields": {"ansible_room": "#film:magicalsamurai.com"}}))
+    assert res[0][1] == "applied" and calls[-1] == (20, "#film:magicalsamurai.com", b.id)
+    assert len(await bot.db.ansible_bridges(10)) == 1
+
+
+async def test_bridges_are_added_switched_and_removed_from_the_screens(env):
+    bot, cog, guild = env
+    ansible = bot.get_cog("Ansible")
+
+    async def fake_link(g, channel, room, replace=None):
+        if await bot.db.ansible_bridge_for(10, channel.id):
+            return False, f"<#{channel.id}> is already mirrored."
+        await bot.db.ansible_add_bridge(10, channel.id, room, room, None, "2026-10-01T00:00:00+00:00")
+        return True, f"The Ansible is on: <#{channel.id}> ⇄ {room}."
+    ansible.link = fake_link
+    res = await run(cog, guild,
+                    ("settings", "ansible.link", {"channel_id": 20, "room": "!a:magicalsamurai.com"}),
+                    ("settings", "ansible.link", {"channel_id": 21, "room": "!b:magicalsamurai.com"}),
+                    ("settings", "ansible.link", {"channel_id": 21, "room": "!c:magicalsamurai.com"}),
+                    ("settings", "ansible.link", {"channel_id": 21, "room": "no room"}),
+                    ("settings", "ansible.link", {"channel_id": 404, "room": "!d:magicalsamurai.com"}))
+    assert [r[1] for r in res] == ["applied", "applied", "failed", "failed", "failed"]
+    assert "already mirrored" in res[2][2] and "<#" not in res[2][2] and "!abc123:server" in res[3][2]
+    first, second = await bot.db.ansible_bridges(10)
+    assert [x["room"] for x in cog.client.snapshots[-1]["settings"]["ansible_bridges"]] == \
+        ["!a:magicalsamurai.com", "!b:magicalsamurai.com"]
+
+    res = await run(cog, guild, ("settings", "ansible.enable", {"id": second.id, "on": False}),
+                    ("settings", "ansible.enable", {"id": 999, "on": True}),
+                    ("settings", "ansible.enable", {"on": "maybe"}))
+    assert [r[1] for r in res] == ["applied", "failed", "failed"]
+    assert [b.enabled for b in await bot.db.ansible_bridges(10)] == [1, 0]
+
+    res = await run(cog, guild, ("settings", "ansible.unlink", {"id": first.id}),
+                    ("settings", "ansible.unlink", {"id": first.id}),
+                    ("settings", "ansible.unlink", {}))
+    assert [r[1] for r in res] == ["applied", "failed", "failed"]
+    assert [b.id for b in await bot.db.ansible_bridges(10)] == [second.id]
+    assert cog.client.snapshots[-1]["settings"]["ansible_channel_id"] == 21     # the old screen shows what's left
 
 
 async def test_articles_saved_from_daisho_follow_the_same_rules(env):

@@ -39,7 +39,7 @@ from ..articles_logic import (ACTIONS, COOLDOWN_SCOPES, MATCHES, MAX_ACTIONS, MA
 from ..timeutil import iso, now_utc, valid_timezone, zone
 from ..discord_util import self_serve_problem
 from ..menu_logic import MAX_OPTIONS, button_text, is_emoji, slug
-from ..voyage_logic import (ParseError, describe_repeat, format_reminders, parse_reminders, repeat_choices,
+from ..voyage_logic import (LOBBY_CHOICES, format_lobby, lobby_for, ParseError, describe_repeat, format_reminders, parse_reminders, repeat_choices,
                             resolve_repeat)
 
 log = logging.getLogger("ursula.daisho")
@@ -141,6 +141,7 @@ def _channel_kind(c) -> str | None:
 # ------------------------------------------------------------ what the Settings screen may change
 # key: (kind, low, high). Kinds match the screen: text, category, forum, role, bool, int, zone.
 SETTINGS = {
+    "lobby_minutes": ("int", 0, 1440),         # the lobby thread, minutes before (0: none)
     # the status under the bot's name: the dot, the kind of line, the line, and Now Playing while music plays
     "presence_status": ("choice", 0, 0), "presence_kind": ("choice", 0, 0), "presence_text": ("line", 0, 128),
     "presence_music": ("bool", 0, 1),
@@ -149,9 +150,18 @@ SETTINGS = {
     "music_enabled": ("bool", 0, 1), "music_youtube": ("bool", 0, 1), "music_dj_role_id": ("role", 0, 0),
     "music_channel_id": ("text", 0, 0), "music_idle_minutes": ("int", 1, 120), "music_volume": ("int", 1, 150),
     "music_stay": ("bool", 0, 1),
-    # the Ansible: a new channel or room goes through the same checks as /pdc ansible link
+    # the Ansible's first bridge (1.4.0: the rest via ansible.link/unlink/enable); a new channel or room goes
+    # through the same checks as /pdc ansible link
     "ansible_enabled": ("bool", 0, 1), "ansible_channel_id": ("text", 0, 0), "ansible_room": ("room", 0, 0),
 }
+ANSIBLE_FIELDS = ("ansible_enabled", "ansible_channel_id", "ansible_room")
+
+
+def _names(guild, text: str) -> str:
+    """Channel mentions as #names, for the screens."""
+    return re.sub(r"<#(\d+)>", lambda m: "#" + getattr(guild.get_channel(int(m[1])), "name", "deleted-channel"), text)
+
+
 LABELS = {"text": "text channel", "category": "category", "forum": "forum channel", "role": "role"}
 
 
@@ -342,6 +352,15 @@ class Daisho(commands.Cog):
         s["timezone"] = s.get("timezone") or self.bot.config.default_timezone
         ansible = self.bot.get_cog("Ansible")
         s["ansible"] = ansible.status() if ansible else {"configured": False}
+        # 1.4.0: every bridge (ansible.link / ansible.unlink / ansible.enable change them). The single
+        # ansible_* fields the Settings screen already knows are the first bridge, so it keeps working.
+        bridges = await ansible.bridges_view(guild) if ansible else []
+        s["ansible_bridges"] = bridges
+        first = bridges[0] if bridges else None
+        s["ansible_enabled"] = int(first["enabled"]) if first else 0
+        s["ansible_channel_id"] = first["channel_id"] if first else None
+        s["ansible_room"] = first["room"] if first else None
+        s.pop("ansible_webhook_id", None)
         s["can_read_messages"] = bool(getattr(self.bot, "can_read_messages", True))
         music = self.bot.get_cog("Music")
         s["music_has_cookies"] = bool(music and music.resolver.cookies)
@@ -376,6 +395,7 @@ class Daisho(commands.Cog):
         out = []
         cog = self.bot.get_cog("Voyages")
         tz = await cog.tz(guild.id) if cog else None
+        lobby_default = (await self.bot.db.get_settings(guild.id)).lobby_minutes
         for v in vs:
             r = await self.bot.db.rsvps(v.id)
             series, choices = [], []
@@ -394,6 +414,9 @@ class Daisho(commands.Cog):
                         "repeat_until": v.repeat_until, "series": series, "repeat_choices": choices,
                         "local_date": datetime.fromisoformat(v.starts_at).astimezone(tz).date().isoformat() if tz else None,
                         "status": v.status, "ping_role": v.ping_role, "image": v.image,
+                        "lobby_minutes": v.lobby_minutes, "lobby_state": v.lobby_state,
+                        "lobby": format_lobby(lobby_for(v.lobby_minutes, lobby_default)),
+                        "lobby_thread_id": v.lobby_thread_id if v.lobby_state == "open" else None,
                         "organizer_id": v.organizer_id, "organizer": self.name_of(guild, v.organizer_id),
                         "channel_id": v.channel_id, "message_id": v.message_id,
                         "aboard": [self.name_of(guild, u) for u in r.aboard],
@@ -470,35 +493,105 @@ class Daisho(commands.Cog):
             raise ApplyError(f"Ursula has no setting called {unknown[0]}.")
         values = {k: self._check_value(guild, k, v) for k, v in fields.items()}
         before = await self.bot.db.get_settings(guild.id)
-        after = {**asdict(before), **values}
+        legacy = {k: values.pop(k) for k in ANSIBLE_FIELDS if k in values}
         notes = []
         ansible = self.bot.get_cog("Ansible")
-        relink = ("ansible_channel_id" in values and values["ansible_channel_id"] != before.ansible_channel_id) or \
-                 ("ansible_room" in values and values["ansible_room"] != before.ansible_room)
-        if relink and after["ansible_channel_id"] and after["ansible_room"]:
-            # a new channel or room: join the room and make the webhook, exactly as /pdc ansible link does
-            if ansible is None:
-                raise ApplyError("The Ansible isn't running in this version of Ursula.")
-            ok, text = await ansible.link(guild, guild.get_channel(after["ansible_channel_id"]), after["ansible_room"])
-            if not ok:
-                raise ApplyError(text)
-            values.pop("ansible_channel_id", None)
-            values.pop("ansible_room", None)
-            values["ansible_enabled"] = after["ansible_enabled"] if "ansible_enabled" in values else 1
-            notes.append(re.sub(r"<#(\d+)>", lambda m: "#" + getattr(guild.get_channel(int(m[1])), "name", "?"), text))
-        elif after["ansible_enabled"] and not (after["ansible_channel_id"] and after["ansible_room"]) and \
-                {"ansible_enabled", "ansible_channel_id", "ansible_room"} & set(values):
-            raise ApplyError("The Ansible needs a channel and a Matrix room while it's on. Switch it off first.")
-        await self.bot.db.update_settings(guild.id, **values)
+        if legacy:
+            notes.append(await self._apply_first_bridge(guild, ansible, legacy))
+        if values:
+            await self.bot.db.update_settings(guild.id, **values)
         self.mark("settings", "guild")   # saved: the screen shows it even if a follow-up step below trips
-        if ansible is not None and {"ansible_enabled", "ansible_channel_id", "ansible_room"} & set(fields):
-            ansible.settings_changed()
         if {"presence_status", "presence_kind", "presence_text", "presence_music"} & set(values):
             self.bot.presence_changed()
         if "timezone" in values and values["timezone"] != before.timezone:
             await self._reschedule_articles(guild)
         self.mark("settings", "guild")
-        return " ".join(["Saved."] + notes)
+        return " ".join(["Saved."] + [n for n in notes if n])
+
+    async def _apply_first_bridge(self, guild, ansible, fields: dict) -> str:
+        """The Settings screen's single Ansible fields, applied to the server's first bridge (or making
+        one): a new channel or room goes through the same checks as /pdc ansible link."""
+        if ansible is None:
+            raise ApplyError("The Ansible isn't running in this version of Ursula.")
+        bridges = await self.bot.db.ansible_bridges(guild.id)
+        first = bridges[0] if bridges else None
+        now = {"ansible_enabled": first.enabled if first else 0,
+               "ansible_channel_id": first.channel_id if first else None,
+               "ansible_room": first.room if first else None}
+        after = {**now, **fields}
+        channel_id, room, on = after["ansible_channel_id"], after["ansible_room"], after["ansible_enabled"]
+        if (channel_id, room) != (now["ansible_channel_id"], now["ansible_room"]):
+            if channel_id and room:
+                ok, text = await ansible.link(guild, guild.get_channel(channel_id), room,
+                                              replace=first.id if first else None)
+                if not ok:
+                    raise ApplyError(_names(guild, text))
+                if "ansible_enabled" in fields and not on:
+                    await ansible.set_enabled(guild.id, False, channel_id)
+                self.mark("settings")
+                return _names(guild, text)
+            if not channel_id and not room and first is not None:
+                _, text = await ansible.unlink(guild, bridge_id=first.id)
+                self.mark("settings")
+                return _names(guild, text)
+            if not on:
+                raise ApplyError("The Ansible needs both a channel and a Matrix room. To stop mirroring, "
+                                 "clear both.")
+        if on and not (channel_id and room):
+            raise ApplyError("The Ansible needs a channel and a Matrix room while it's on. Switch it off first.")
+        if "ansible_enabled" in fields and first is not None and bool(on) != bool(first.enabled):
+            await ansible.set_enabled(guild.id, bool(on), first.channel_id)
+            self.mark("settings")
+        return ""
+
+    # ------------------------------------------------------------ applying: the Ansible's bridges (1.4.0)
+    def _bridge_payload(self, guild, p: dict):
+        bridge_id = p.get("id")
+        if bridge_id is not None and (isinstance(bridge_id, bool) or not isinstance(bridge_id, int)):
+            raise ApplyError("That bridge arrived garbled; make the change again.")
+        ansible = self.bot.get_cog("Ansible")
+        if ansible is None:
+            raise ApplyError("The Ansible isn't running in this version of Ursula.")
+        return ansible, bridge_id
+
+    async def apply_ansible_link(self, guild, p: dict) -> str:
+        """Add a bridge, or (with an id) move that one to another channel or room."""
+        ansible, bridge_id = self._bridge_payload(guild, p)
+        channel_id = self._check_value(guild, "ansible_channel_id", p.get("channel_id"))
+        room = self._check_value(guild, "ansible_room", p.get("room"))
+        if not channel_id or not room:
+            raise ApplyError("A bridge needs a text channel and a Matrix room.")
+        ok, text = await ansible.link(guild, guild.get_channel(channel_id), room, replace=bridge_id)
+        self.mark("settings")
+        if not ok:
+            raise ApplyError(_names(guild, text))
+        return _names(guild, text)
+
+    async def apply_ansible_unlink(self, guild, p: dict) -> str:
+        ansible, bridge_id = self._bridge_payload(guild, p)
+        if bridge_id is None:
+            raise ApplyError("Which bridge? (No id came with the change.)")
+        ok, text = await ansible.unlink(guild, bridge_id=bridge_id)
+        self.mark("settings")
+        if not ok:
+            raise ApplyError("That bridge is already gone.")
+        return _names(guild, text)
+
+    async def apply_ansible_enable(self, guild, p: dict) -> str:
+        """Switch one bridge (with an id) or every bridge on or off."""
+        ansible, bridge_id = self._bridge_payload(guild, p)
+        on = p.get("on")
+        if not isinstance(on, bool) and on not in (0, 1):
+            raise ApplyError("Switch it on or off.")
+        channel_id = None
+        if bridge_id is not None:
+            b = await self.bot.db.ansible_bridge(bridge_id)
+            if b is None or b.guild_id != guild.id:
+                raise ApplyError("That bridge is gone.")
+            channel_id = b.channel_id
+        text = await ansible.set_enabled(guild.id, bool(on), channel_id)
+        self.mark("settings")
+        return _names(guild, text)
 
     async def _reschedule_articles(self, guild) -> None:
         tz = zone((await self.bot.db.get_settings(guild.id)).timezone, self.bot.config.default_timezone)
@@ -893,6 +986,15 @@ class Daisho(commands.Cog):
             raise ApplyError(problem)
         return role.id
 
+
+    @staticmethod
+    def _lobby(value) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, int) or (value and value not in LOBBY_CHOICES):
+            raise ApplyError("Pick when the lobby thread opens from the list.")
+        return value
+
     async def apply_voyage_update(self, guild, p: dict) -> str:
         cog = self.bot.get_cog("Voyages")
         v = await self.bot.db.get_voyage(int(p.get("id") or 0))
@@ -941,6 +1043,10 @@ class Daisho(commands.Cog):
                 raise ApplyError(str(e))
             if ",".join(map(str, mins)) != v.reminders:
                 changes.update(reminders=",".join(map(str, mins)), reminders_sent="")
+        if "lobby_minutes" in p:
+            lobby = self._lobby(p["lobby_minutes"])
+            if lobby != v.lobby_minutes:
+                changes["lobby_minutes"] = lobby
         if "ping_role" in p:
             if p["ping_role"] not in ("off", "posted", "reminders"):
                 raise ApplyError("Pick when the role is tagged.")
@@ -1069,7 +1175,8 @@ class Daisho(commands.Cog):
         v = await cog.launch(guild, channel, member.id, title=title, description=description, capacity=capacity,
                              starts=starts, duration=duration, minutes=minutes, repeat=repeat, ping_role=ping,
                              repeat_until=until, image=image, place=self._place(p.get("place")),
-                             notify_role_id=role_id)
+                             notify_role_id=role_id,
+                             lobby_minutes=self._lobby(p.get("lobby_minutes")))
         if v is None:
             raise ApplyError(f"Ursula couldn't post the gathering's card in #{channel.name}.")
         self.mark("voyages")
@@ -1134,6 +1241,9 @@ class Daisho(commands.Cog):
 
 HANDLERS = {
     "settings.update": Daisho.apply_settings,
+    "ansible.link": Daisho.apply_ansible_link,
+    "ansible.unlink": Daisho.apply_ansible_unlink,
+    "ansible.enable": Daisho.apply_ansible_enable,
     "article.save": Daisho.apply_article_save,
     "article.delete": Daisho.apply_article_delete,
     "page.save": Daisho.apply_page_save,

@@ -40,7 +40,7 @@ async def test_command_tree(bot):
     assert {c.name for c in pdc.commands} == {"settings", "timezone", "gatherings", "regions", "salas", "ansible",
                                               "status"}
     assert {c.name for c in pdc.get_command("status").commands} == {"set", "music", "show"}
-    assert {c.name for c in pdc.get_command("ansible").commands} == {"link", "enable", "status"}
+    assert {c.name for c in pdc.get_command("ansible").commands} == {"link", "unlink", "enable", "status"}
     assert {c.name for c in top["salas"].commands} == {"queue", "nowplaying", "skip", "pause", "resume", "stop", "clear",
                                                      "remove", "move", "shuffle", "repeat", "seek", "volume", "lyrics",
                                                      "leave"}

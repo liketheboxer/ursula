@@ -204,10 +204,19 @@ async def test_create_rsvp_waitlist_and_promotion(env):
     assert 2 not in r.aboard and r.aboard[-1] == 6
 
 
+async def planned_days_ago(bot, v):
+    """As if planned two days ahead, so its 1-day reminder is due whatever the time of day the tests run."""
+    starts = datetime.fromisoformat(v.starts_at)
+    await bot.db.conn.execute("UPDATE voyages SET created_at = ? WHERE id = ?",
+                              ((starts - timedelta(days=2)).isoformat(), v.id))
+    await bot.db.conn.commit()
+
+
 async def test_reminders_start_and_end(env):
     bot, cog, guild, text = env
     await make_voyage(cog, guild, repeat="weekly", duration=60)
     (v,) = await bot.db.voyages_with_status("scheduled")
+    await planned_days_ago(bot, v)
     await cog.on_button(interaction_for(guild, 2), "aboard", v.id)
     await cog.on_button(interaction_for(guild, 7), "maybe", v.id)
     starts = datetime.fromisoformat(v.starts_at)

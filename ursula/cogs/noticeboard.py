@@ -41,20 +41,29 @@ STARTER_GUIDE = [
      "Hop in a voice channel and `/play` a song name or a link. The Now Playing card has buttons to pause, "
      "skip, stop, shuffle and repeat, and `/salas queue` shows what's next."),
     ("The Ansible",
-     "{mirror} is carried to a Matrix room and back. Messages from Matrix show up here under the sender's "
-     "name, and yours go there under yours."),
+     "{mirror} Messages from Matrix show up under the sender's name, and yours go there under yours."),
     ("Need a hand?",
      "Ask the PDC (the server's admins), or say hello with `/ursula`."),
 ]
 
 
-def starter_text(body: str, settings) -> str:
+def mirror_sentence(channel_ids) -> str:
+    """Which channels the Ansible carries to Matrix, as a sentence for the welcome page."""
+    links = [f"<#{c}>" for c in channel_ids]
+    if not links:
+        return "One channel is carried to a Matrix room and back."
+    if len(links) == 1:
+        return f"{links[0]} is carried to a Matrix room and back."
+    return f"{', '.join(links[:-1])} and {links[-1]} are each carried to their own Matrix room and back."
+
+
+def starter_text(body: str, settings, mirrored=()) -> str:
     """A starter section with the server's own channels linked: a channel link keeps working when the
-    channel is renamed."""
+    channel is renamed. `mirrored`: the channels the Ansible carries."""
     def link(channel_id, fallback):
         return f"<#{channel_id}>" if channel_id else fallback
     return (body.replace("{events}", link(settings.voyage_channel_id, "the gatherings channel"))
-                .replace("{mirror}", link(settings.ansible_channel_id, "One channel")))
+                .replace("{mirror}", mirror_sentence(mirrored)))
 
 
 class SectionModal(discord.ui.Modal):
@@ -374,8 +383,9 @@ class Noticeboard(commands.GroupCog, group_name="postings",
             return
         p = await self.bot.db.create_page(interaction.guild_id, GUIDE_KEY, "Welcome to Anarres")
         s = await self.bot.db.get_settings(interaction.guild_id)
+        mirrored = [b.channel_id for b in await self.bot.db.ansible_bridges(interaction.guild_id)]
         for heading, body in STARTER_GUIDE:
-            await self.bot.db.add_section(p.id, heading, starter_text(body, s))
+            await self.bot.db.add_section(p.id, heading, starter_text(body, s, mirrored))
         await interaction.response.send_message(
             f"Drafted **Welcome to Anarres** with {len(STARTER_GUIDE)} sections (key `{GUIDE_KEY}`). Read it with "
             "/postings preview, change anything with /postings section edit, then post it.", ephemeral=True)
