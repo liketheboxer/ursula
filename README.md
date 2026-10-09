@@ -2,7 +2,7 @@
 
 **U**nconventional **R**eplies, **S**chedules & **U**nwarranted **L**eftist **A**phorisms: Anarres's Discord bot, named for Ursula K. Le Guin.
 
-A Python Discord bot (discord.py 2.x) that runs under Exocomp and reports telemetry to The Magical Samurai. Ursula was forked from PlunderBot 1.6.3 and keeps five of its features, renamed after Le Guin's books (mostly *The Dispossessed*), plus one new one:
+A Python Discord bot (discord.py 2.x) that runs under Exocomp and reports telemetry to The Magical Samurai. Ursula was forked from PlunderBot 1.6.3 and keeps six of its features (birthdays came back in 1.5.0), renamed after Le Guin's books (mostly *The Dispossessed*), plus one new one:
 
 | Ursula | What it is | From PlunderBot |
 |---|---|---|
@@ -11,6 +11,7 @@ A Python Discord bot (discord.py 2.x) that runs under Exocomp and reports teleme
 | **Postings** (`/postings`) | Polished pages: rules, a welcome guide | Notice Board |
 | **Syndicates** (`/syndicate`) | Role menus members pick from | Role menus (Colours) |
 | **Salas** (`/play`, `/salas`) | Music in voice channels | Jukebox |
+| **Birthdays** (`/birthday`) | Members save their own; Ursula marks the day | Birthdays (1.5.0) |
 | **The Ansible** (`/pdc ansible`) | Channels mirrored to Matrix rooms, both ways, each to its own room | new |
 | **The PDC** (`/pdc`) | Settings: Production and Distribution Coordination | Admin |
 | **The Analogy** | The manual, in Daisho | Manual |
@@ -38,6 +39,8 @@ Inside the code the PlunderBot names stay (a gathering is a `Voyage`, a custom a
 | `/pdc gatherings channel` | Manage Server | Where gathering cards go (empty: wherever `/gathering call` is used) |
 | `/pdc gatherings lobby` | Manage Server | When each gathering's lobby thread opens (default 1 hour before; Off for none). Each gathering can pick its own |
 | `/pdc regions auto` | Manage Server | Match region roles to time zones. Also `set`, `clear`, `list` |
+| `/birthday set` | Everyone | Save your birthday: month and day, never the year. Also `mine`, `remove`, and `upcoming` (the next ten, without pinging anyone) |
+| `/pdc birthdays channel` | Manage Server | Where birthdays are announced (this switches it on). Also `hour` (in the server's time zone), `role` (worn for the day) and `off` |
 | `/pdc salas status` | Manage Server | How music is set up. Also `enable`, `youtube`, `djrole`, `channel`, `settings` |
 | `/pdc status set` | Manage Server | The line under Ursula's name, how it's worded (Playing, Listening to...) and her dot. Also `music` (Now Playing: song while Salas plays; on by default) and `show` |
 | `/pdc ansible link` | Manage Server | Mirror a channel and a Matrix room, and switch it on. Run it again for each channel you want mirrored; linking a channel that's already mirrored moves it to the new room |
@@ -67,6 +70,12 @@ Inside the code the PlunderBot names stay (a gathering is a `Voyage`, a custom a
 ### How Customs work
 
 The same as PlunderBot's Articles: **when** something happens (words said, a member joining, leaving, getting or losing a role, boosting, a reaction, a schedule), Ursula **does** things (reply or post, react, give or take a role, count, repost, pin) within **limits** (cooldown, chance, required role, channels). Replies can use `{member}`, `{name}`, `{author}`, `{count}`, `{nth}`, `{server}`, `{channel}`, `{role}`, `{cuss}` and `{aphorism}`.
+
+### How Birthdays work
+
+- Members save their own with `/birthday set`: a month and a day. No year is ever stored, so nobody's age is on file. A date can be fixed within the hour; after that it's locked for 30 days, so nobody has a birthday every week. February 29 is marked on February 28 in other years.
+- At the set hour (9 AM by default, in the server's time zone) Ursula announces the day's birthdays in the PDC's chosen channel, pinging only the people celebrating, and gives them the birthday role until the next day. If she was offline at that hour, she announces later that day, never twice.
+- With no channel set nothing is announced, but dates are still saved. Someone who leaves the server has their date deleted.
 
 ### How Salas works
 
@@ -121,7 +130,7 @@ The database is `/data/ursula.db`; the container runs as user 10001 (`ursula`).
 
 ## Telemetry
 
-Gauges `voyages_scheduled`, `ansible_up` (1 while the mirror is syncing) and `ansible_bridges` (how many channels are being mirrored). Background errors are reported as `voyage-clock`, `articles-clock`, `ansible` and `daisho`.
+Gauges `voyages_scheduled`, `ansible_up` (1 while the mirror is syncing), `ansible_bridges` (how many channels are being mirrored) and `birthdays_on_file`. Background errors are reported as `voyage-clock`, `articles-clock`, `ansible`, `birthday-announcer` and `daisho`.
 
 ## Developing
 
@@ -147,7 +156,8 @@ The Ansible's tests run against a small fake homeserver (`tests/test_ansible.py`
 | `ursula/ansible_logic.py` | Turning a Discord message into a Matrix event and back |
 | `ursula/voyage_logic.py` | Gatherings: dates, times, repeats, reminders, the card |
 | `ursula/articles_logic.py` | Customs: matching words, schedules, reply templates |
-| `ursula/cogs/` | `core`, `admin` (the PDC), `voyages` (Gatherings), `regions`, `colours` (Syndicates), `noticeboard` (Postings), `articles` (Customs), `music` (Salas), `ansible`, `daisho` |
+| `ursula/birthday_logic.py` | Birthdays: valid dates, February 29, the change lock, when to announce |
+| `ursula/cogs/` | `core`, `admin` (the PDC), `voyages` (Gatherings), `regions`, `colours` (Syndicates), `noticeboard` (Postings), `articles` (Customs), `music` (Salas), `ansible`, `birthdays`, `daisho` |
 | `exocomp_telemetry.py` | Exocomp's telemetry helper, vendored |
 
 ## House rules

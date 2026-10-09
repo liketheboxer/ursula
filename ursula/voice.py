@@ -258,6 +258,46 @@ LINES: dict[str, list[str]] = {
     "music_queue_full": [
         "{cuss} The queue's full. Let a few play first.",
     ],
+    # ------------------------------------------------------------ birthdays (1.5.0)
+    "birthday_set": [
+        "Noted: {date}. Just the day, never the year; your age is nobody's business but yours.",
+        "{date}, written down. I'll make sure Anarres knows when it comes round. No year kept, on principle.",
+    ],
+    "birthday_changed": [
+        "Changed to {date}. If that was a typo you've got an hour to fix it; after that it stays put for a "
+        "month, so nobody has a birthday every Tuesday.",
+    ],
+    "birthday_mine": [
+        "I have you down for {date}.",
+    ],
+    "birthday_invalid": [
+        "{cuss} {month_name} {day} isn't on any calendar I know. Try again?",
+    ],
+    "birthday_too_soon": [
+        "{cuss} Your birthday was changed recently, so it stays put until {date}. One birthday per person, "
+        "shared fairly.",
+    ],
+    "birthday_removed": [
+        "Forgotten. No birthday on file for you now.",
+    ],
+    "birthday_not_found": [
+        "I don't have a birthday for you. `/birthday set` adds one, if you'd like it marked.",
+    ],
+    "birthdays_none": [
+        "Nobody's saved a birthday yet. `/birthday set` starts the calendar.",
+    ],
+    "birthdays_upcoming_header": [
+        "**Birthdays coming up on Anarres**",
+    ],
+    "birthday_toast_one": [
+        "🎂 Happy birthday, {names}! Another trip round the sun, and the whole commons is glad you made it.",
+        "🎂 It's {names}'s birthday. Nobody earned the cake; everybody gets some. Happy birthday!",
+        "🎂 Happy birthday, {names}! {aphorism}",
+    ],
+    "birthday_toast_many": [
+        "🎂 Happy birthday to {names}! Shared birthdays mean shared cake. That's just good organizing.",
+        "🎂 A busy day on Anarres: happy birthday, {names}!",
+    ],
 }
 
 MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July", "August",

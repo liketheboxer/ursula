@@ -150,6 +150,8 @@ SETTINGS = {
     "music_enabled": ("bool", 0, 1), "music_youtube": ("bool", 0, 1), "music_dj_role_id": ("role", 0, 0),
     "music_channel_id": ("text", 0, 0), "music_idle_minutes": ("int", 1, 120), "music_volume": ("int", 1, 150),
     "music_stay": ("bool", 0, 1),
+    # birthdays (1.5.0): the channel switches announcements on; the hour is in the server's time zone
+    "birthday_channel_id": ("text", 0, 0), "birthday_hour": ("int", 0, 23), "birthday_role_id": ("role", 0, 0),
     # the Ansible's first bridge (1.4.0: the rest via ansible.link/unlink/enable); a new channel or room goes
     # through the same checks as /pdc ansible link
     "ansible_enabled": ("bool", 0, 1), "ansible_channel_id": ("text", 0, 0), "ansible_room": ("room", 0, 0),
@@ -362,6 +364,9 @@ class Daisho(commands.Cog):
         s["ansible_room"] = first["room"] if first else None
         s.pop("ansible_webhook_id", None)
         s["can_read_messages"] = bool(getattr(self.bot, "can_read_messages", True))
+        s["birthdays_on_file"] = len([1 for uid, _, _ in await self.bot.db.birthdays(guild.id)
+                                      if guild.get_member(uid) is not None])     # 1.5.0
+        s.pop("birthday_last_announced", None)
         music = self.bot.get_cog("Music")
         s["music_has_cookies"] = bool(music and music.resolver.cookies)
         s["music_has_spotify"] = bool(music and music.resolver.cfg.spotify)
@@ -470,6 +475,10 @@ class Daisho(commands.Cog):
                 raise ApplyError("That role no longer exists.")
             if role.is_default() or role.managed:
                 raise ApplyError("Pick an ordinary role, not @everyone or a role another app manages.")
+            if key == "birthday_role_id":
+                problem = self_serve_problem(role, guild.me)
+                if problem:
+                    raise ApplyError(problem)
             return value
         channel = guild.get_channel(value)
         if channel is None or (kind == "text" and not isinstance(channel, discord.TextChannel)) or \

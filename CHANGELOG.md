@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.5.0 (2026-10-09): birthdays
+
+- **Birthdays**, back from PlunderBot. Members save their own with `/birthday set` (month and day; the year is never asked for or stored), and `/birthday mine`, `remove` and `upcoming` (the next ten, names shown but nobody pinged).
+- On the day, at the set hour in the server's time zone, Ursula announces it in the chosen channel, pinging only whoever's celebrating, and hands out the birthday role (if one is set) until the next day. Missed the hour while offline: she announces later that day, never twice.
+- A saved date can be corrected within the hour, then stays put for 30 days. February 29 birthdays are marked on February 28 in common years. A member who leaves the server has their date deleted.
+- **The PDC:** `/pdc birthdays channel` (switches announcements on), `hour`, `role` and `off`; `/pdc settings` shows them with how many dates are on file. The role can't carry moderator permissions and must sit below Ursula's (and your own) top role. Also on Daisho's Settings screen (The Magical Samurai 1.25.0).
+- The database tables were already there from PlunderBot, so there's no migration and nothing to set up beyond picking a channel.
+- New gauge `birthdays_on_file`; announcer errors are reported as `birthday-announcer`.
+
 ## 1.4.0 (2026-10-09): the Ansible mirrors more than one channel
 
 - **Any number of channels.** `/pdc ansible link` adds another bridge each time you run it: one Discord channel, one Matrix room, carried both ways as before. Linking a channel that's already mirrored moves it to the new room. A room is only ever in one bridge (Ursula says which channel has it).
@@ -46,5 +55,5 @@ Ursula's first version, forked from PlunderBot 1.6.3 for Anarres.
 - **The Ansible** (new): one Discord channel and one Matrix room mirrored both ways. Ursula's own Matrix client (no SDK); Matrix messages arrive through a webhook under the sender's name with mentions off; files up to 8 MB both ways; replies, edits and deletions follow. Set up with `/pdc ansible link`, `enable` and `status`, or on the Daisho Settings screen. Secrets `MATRIX_HOMESERVER` and `MATRIX_ACCESS_TOKEN`.
 - **The PDC** (`/pdc`): settings, timezone, gatherings channel, regions, Salas, the Ansible.
 - Daisho sync: the same snapshot keys as PlunderBot's (without crews and the ledger), the API at `/api/m/ursula/v1`, Ansible settings and status.
-- Left behind: Crew Call, birthdays, the Gangplank, the Ship's Log, the Crow's Nest, Parley and the Ship's Ledger. Their old database tables stay (migrations are append-only) but nothing uses them.
+- Left behind: Crew Call, birthdays (back in 1.5.0), the Gangplank, the Ship's Log, the Crow's Nest, Parley and the Ship's Ledger. Their old database tables stay (migrations are append-only) but nothing uses them.
 - A new voice: an Odonian who'd rather everyone just helped each other, with original cusses and aphorisms.

@@ -13,11 +13,16 @@ from discord import app_commands
 from discord.ext import commands
 
 from .. import presence_logic as PL
+from ..discord_util import above_their_reach, self_serve_problem
 from ..timeutil import valid_timezone
 from ..region_logic import guess_zone
 from ..voyage_logic import LOBBY_CHOICES, format_lobby, zone_from_name
 
 _ZONES = sorted(available_timezones())
+
+
+def hour_label(hour: int) -> str:
+    return f"{hour % 12 or 12}:00 {'AM' if hour < 12 else 'PM'}"
 
 
 @app_commands.guild_only()
@@ -26,6 +31,7 @@ class Admin(commands.GroupCog, group_name="pdc", group_description="Ursula's set
     gatherings = app_commands.Group(name="gatherings", description="Gathering settings")
     regions = app_commands.Group(name="regions", description="Region roles that set members' time zones")
     music = app_commands.Group(name="salas", description="Salas: music in voice channels")
+    birthdays = app_commands.Group(name="birthdays", description="Where and when birthdays are announced")
     ansible = app_commands.Group(name="ansible", description="The Ansible: mirror channels to Matrix rooms")
     status = app_commands.Group(name="status", description="What shows under Ursula's name in Discord")
 
@@ -44,6 +50,7 @@ class Admin(commands.GroupCog, group_name="pdc", group_description="Ursula's set
             f"Time zone: {tz}\n"
             f"Gathering cards: {f'<#{s.voyage_channel_id}>' if s.voyage_channel_id else 'wherever /gathering call is used'}\n"
             f"Salas (music): {'on' if s.music_enabled else 'off'}\n"
+            f"Birthdays: {await self.birthdays_line(interaction.guild_id, s)}\n"
             f"The Ansible: {await ansible.describe_guild(interaction.guild_id) if ansible else 'not running'}"
         )
         await interaction.response.send_message(text, ephemeral=True,
@@ -259,6 +266,65 @@ class Admin(commands.GroupCog, group_name="pdc", group_description="Ursula's set
         await interaction.response.send_message(
             f"Starting volume {s.music_volume}%, leaves after {s.music_idle_minutes} quiet minutes, "
             f"24/7 {'on' if s.music_stay else 'off'}.", ephemeral=True)
+
+    # ------------------------------------------------------------ birthdays (1.5.0)
+    async def birthdays_line(self, guild_id: int, s) -> str:
+        count = len(await self.bot.db.birthdays(guild_id))
+        if not s.birthday_channel_id:
+            return f"not announced (no channel set) · {count} on file"
+        tz = s.timezone or self.bot.config.default_timezone
+        role = f" · <@&{s.birthday_role_id}> for the day" if s.birthday_role_id else ""
+        return f"<#{s.birthday_channel_id}> at {hour_label(s.birthday_hour)} {tz}{role} · {count} on file"
+
+    @birthdays.command(name="channel", description="Where birthdays are announced (this switches announcements on)")
+    async def birthday_channel(self, interaction: discord.Interaction, channel: discord.TextChannel) -> None:
+        perms = channel.permissions_for(interaction.guild.me)
+        if not (perms.view_channel and perms.send_messages):
+            await interaction.response.send_message(f"Ursula can't post in {channel.mention}: she needs View Channel "
+                                                    "and Send Messages there.", ephemeral=True)
+            return
+        await self.bot.db.update_settings(interaction.guild_id, birthday_channel_id=channel.id)
+        self._daisho()
+        await interaction.response.send_message(f"Birthdays will be announced in {channel.mention}.", ephemeral=True)
+
+    @birthdays.command(name="hour", description="What hour birthdays are announced, in the server's time zone")
+    @app_commands.describe(hour="0 to 23: 9 is 9 AM, 18 is 6 PM")
+    async def birthday_hour(self, interaction: discord.Interaction, hour: app_commands.Range[int, 0, 23]) -> None:
+        s = await self.bot.db.update_settings(interaction.guild_id, birthday_hour=hour)
+        self._daisho()
+        await interaction.response.send_message(
+            f"Birthdays will be announced at {hour_label(hour)} {s.timezone or self.bot.config.default_timezone} "
+            "(the server's time zone, set with /pdc timezone).", ephemeral=True)
+
+    @birthdays.command(name="role", description="A role members wear on their birthday (leave empty to turn off)")
+    async def birthday_role(self, interaction: discord.Interaction, role: discord.Role | None = None) -> None:
+        if role is None:
+            await self.bot.db.update_settings(interaction.guild_id, birthday_role_id=None)
+            self._daisho()
+            await interaction.response.send_message("No birthday role now.", ephemeral=True)
+            return
+        problem = self_serve_problem(role, interaction.guild.me) or above_their_reach(interaction.user, role)
+        if problem:
+            await interaction.response.send_message(problem, ephemeral=True,
+                                                    allowed_mentions=discord.AllowedMentions.none())
+            return
+        await self.bot.db.update_settings(interaction.guild_id, birthday_role_id=role.id)
+        self._daisho()
+        await interaction.response.send_message(f"Members will wear {role.mention} on their birthday; it comes off "
+                                                "the next day.", ephemeral=True,
+                                                allowed_mentions=discord.AllowedMentions.none())
+
+    @birthdays.command(name="off", description="Stop announcing birthdays (saved dates are kept)")
+    async def birthday_off(self, interaction: discord.Interaction) -> None:
+        await self.bot.db.update_settings(interaction.guild_id, birthday_channel_id=None)
+        self._daisho()
+        await interaction.response.send_message(
+            "Birthdays won't be announced. Members can still save theirs, and nothing on file is lost.", ephemeral=True)
+
+    def _daisho(self) -> None:
+        cog = self.bot.get_cog("Daisho")
+        if cog is not None:
+            cog.mark("settings")
 
     # ------------------------------------------------------------ the Ansible (Matrix mirror)
     @ansible.command(name="link", description="Mirror a channel and a Matrix room both ways (add as many as you like)")

@@ -27,6 +27,7 @@ COGS = [
     "ursula.cogs.ansible",
     "ursula.cogs.daisho",
     "ursula.cogs.presence",
+    "ursula.cogs.birthdays",
 ]
 
 

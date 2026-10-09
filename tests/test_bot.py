@@ -28,7 +28,8 @@ async def bot(tmp_path):
 
 async def test_command_tree(bot):
     top = {c.name: c for c in bot.tree.get_commands()}
-    assert set(top) == {"ursula", "pdc", "gathering", "timezone", "syndicate", "postings", "customs", "play", "salas"}
+    assert set(top) == {"ursula", "pdc", "gathering", "timezone", "syndicate", "postings", "customs", "play", "salas",
+                        "birthday"}
     customs = top["customs"]
     assert customs.guild_only and customs.default_permissions.manage_guild
     assert {c.name for c in customs.commands} == {"new", "edit", "reply", "react", "role", "count", "repost", "pin",
@@ -38,7 +39,9 @@ async def test_command_tree(bot):
     assert isinstance(pdc, app_commands.Group)
     assert pdc.guild_only and pdc.default_permissions.manage_guild
     assert {c.name for c in pdc.commands} == {"settings", "timezone", "gatherings", "regions", "salas", "ansible",
-                                              "status"}
+                                              "status", "birthdays"}
+    assert {c.name for c in pdc.get_command("birthdays").commands} == {"channel", "hour", "role", "off"}
+    assert {c.name for c in top["birthday"].commands} == {"set", "remove", "mine", "upcoming"}
     assert {c.name for c in pdc.get_command("status").commands} == {"set", "music", "show"}
     assert {c.name for c in pdc.get_command("ansible").commands} == {"link", "unlink", "enable", "status"}
     assert {c.name for c in top["salas"].commands} == {"queue", "nowplaying", "skip", "pause", "resume", "stop", "clear",

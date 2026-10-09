@@ -546,3 +546,18 @@ async def test_checks_in_every_3_seconds_while_the_music_is_on(env):
     guild.voice_client = None
     cog.pace(guild)
     assert cog.loop.seconds == POLL_SECONDS
+
+
+async def test_birthday_settings_from_the_screens(env):
+    """1.5.0: birthdays' channel, hour and role are on the Settings screen; the count of dates on file too."""
+    bot, cog, guild = env
+    res = await run(cog, guild, ("settings", "settings.update", {"fields": {"birthday_channel_id": 21,
+                                                                             "birthday_hour": 9}}),
+                    ("settings", "settings.update", {"fields": {"birthday_hour": 24}}),
+                    ("settings", "settings.update", {"fields": {"birthday_last_announced": "2026-01-01"}}))
+    assert [r[1] for r in res] == ["applied", "failed", "failed"]
+    s = await bot.db.get_settings(10)
+    assert (s.birthday_channel_id, s.birthday_hour) == (21, 9)
+    sent = cog.client.snapshots[-1]["settings"]
+    assert sent["birthday_channel_id"] == 21 and sent["birthdays_on_file"] == 0
+    assert "birthday_last_announced" not in sent
