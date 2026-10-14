@@ -122,3 +122,33 @@ async def test_the_client_fetches_and_checks_the_file():
                 await c.dispatch_file(9, SHA)
         finally:
             await c.close()
+
+
+async def test_a_dispatch_tags_only_the_person_it_names(env):
+    bot, cog, guild, text = env
+    boxer = guild.members[1]
+    snakes = SimpleNamespace(id=222222222222222222, display_name="Snakes")
+    outsider = SimpleNamespace(id=333333333333333333, display_name="Takver")
+    guild.members[snakes.id], guild.members[outsider.id] = snakes, outsider
+    can_see = [guild.me, snakes]
+    text.permissions_for = lambda who: perms(view_channel=any(who is x for x in can_see))
+    await bot.db.update_settings(guild.id, dispatch_channel_id=text.id)
+    d = Daisho(bot)
+    d.client = Files()
+    msg = await d.apply_dispatch_post(guild, payload(mention=str(snakes.id), text="@everyone hi <@333333333333333333>"))
+    assert msg == "Posted in #gatherings, tagging Snakes."
+    content, kw = text.sent[-1]
+    assert content.startswith(f"<@{snakes.id}> **Boxer's morning brief")
+    am = kw["allowed_mentions"]
+    assert am.users == [snakes] and am.everyone is False and am.roles is False     # only her, never Takver
+    # someone who can't see the channel, or isn't in the server, isn't tagged; the report still goes out
+    msg = await d.apply_dispatch_post(guild, payload(mention=str(outsider.id)))
+    assert "Didn't tag Takver" in msg and not text.sent[-1][0].startswith("<@")
+    assert text.sent[-1][1]["allowed_mentions"].users is False
+    msg = await d.apply_dispatch_post(guild, payload(mention="444444444444444444"))
+    assert "not in the server" in msg
+    # anything but a bare ID is ignored
+    for junk in ("<@222222222222222222>", "everyone", 222222222222222222, "12"):
+        await d.apply_dispatch_post(guild, payload(mention=junk))
+        assert text.sent[-1][0].startswith("**")
+    assert boxer.id == 1

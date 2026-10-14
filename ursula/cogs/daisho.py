@@ -461,7 +461,8 @@ class Daisho(commands.Cog):
 
     # ------------------------------------------------------------ applying: dispatches (1.6.0)
     async def apply_dispatch_post(self, guild, payload: dict) -> str:
-        """Post a report handed over through Daisho (1.6.0): fetch its PDF, check it, attach it."""
+        """Post a report handed over through Daisho (1.6.0): fetch its PDF, check it, attach it. Since 1.7.0 it
+        tags the person the dispatch names, if they're in the server and can see the channel; nobody else."""
         try:
             did, title, text, filename, sha = DL.check_payload(payload)
         except DL.DispatchProblem as e:
@@ -481,9 +482,19 @@ class Daisho(commands.Cog):
             data = await self.client.dispatch_file(did, sha)
         except DL.DispatchProblem as e:
             raise ApplyError(str(e))
-        await channel.send(DL.message(title, text), file=discord.File(io.BytesIO(data), filename=filename),
-                           allowed_mentions=discord.AllowedMentions.none())
-        return f"Posted in #{getattr(channel, 'name', 'the dispatch channel')}."
+        where = f"#{getattr(channel, 'name', 'the dispatch channel')}"
+        tag, note = DL.mention_of(payload), ""
+        member = guild.get_member(tag) if tag else None
+        if tag and (member is None or not channel.permissions_for(member).view_channel):
+            note = (" Didn't tag them: they're not in the server." if member is None
+                    else f" Didn't tag {member.display_name}: they can't see {where}.")
+            member = None
+        allowed = (discord.AllowedMentions(everyone=False, roles=False, users=[member], replied_user=False)
+                   if member else discord.AllowedMentions.none())
+        await channel.send(DL.message(title, text, member.id if member else None),
+                           file=discord.File(io.BytesIO(data), filename=filename), allowed_mentions=allowed)
+        who = f", tagging {member.display_name}" if member else ""
+        return f"Posted in {where}{who}.{note}"
 
     # ------------------------------------------------------------ applying: settings
     def _check_value(self, guild, key: str, value):

@@ -46,11 +46,21 @@ def check_file(data: bytes, sha: str) -> None:
         raise DispatchProblem("What arrived isn't the file that was sent; send it again.")
 
 
-def message(title: str, text: str) -> str:
-    """The words posted with the PDF: the title in bold, then the text, within Discord's limit.
-    Mentions are switched off when it's sent, so nothing in here can ping anyone."""
+MENTION = re.compile(r"\d{15,21}")
+
+
+def mention_of(payload: dict) -> int | None:
+    """The Discord user ID a dispatch names to tag (1.7.0), or None. Anything but a bare ID is ignored."""
+    m = payload.get("mention")
+    return int(m) if isinstance(m, str) and MENTION.fullmatch(m) else None
+
+
+def message(title: str, text: str, tag: int | None = None) -> str:
+    """The words posted with the PDF: the person it's for (if tagged), the title in bold, then the text,
+    within Discord's limit. Only that one person may be pinged; every other mention is switched off when
+    it's sent, so nothing in the title or text can ping anyone."""
     title = " ".join(title.replace("*", "").split())[:200]
-    head = f"**{title}**"
+    head = (f"<@{tag}> " if tag else "") + f"**{title}**"
     body = text.strip()
     if not body:
         return head

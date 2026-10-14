@@ -82,7 +82,7 @@ The same as PlunderBot's Articles: **when** something happens (words said, a mem
 ### How Dispatches work
 
 - Something outside Discord that has a **dispatch key** (KRANG's morning and evening briefings, sent from Boxer's PC) hands The Magical Samurai a finished report as a PDF. Keys are made on Ursula's **Dispatches** screen there, and can do nothing else.
-- Daisho queues it like any other change. Within about 15 seconds Ursula fetches the PDF with her module token, checks it's exactly the file the change names (its SHA-256) and a real PDF under Discord's 10 MB, and posts it to the dispatch channel: the title in bold, a few lines of text, and the PDF attached. Mentions are switched off, so nothing in a report can ping anyone.
+- Daisho queues it like any other change. Within about 15 seconds Ursula fetches the PDF with her module token, checks it's exactly the file the change names (its SHA-256) and a real PDF under Discord's 10 MB, and posts it to the dispatch channel: the title in bold, a few lines of text, and the PDF attached. If the dispatch names who it's for (a Discord user ID), Ursula tags that one person, as long as they can see the channel; every other mention is switched off, so nothing in a report can ping anyone else.
 - No channel set, or no **Attach Files** there: the dispatch fails with the reason, and can be sent again from the Dispatches screen once that's fixed. Ursula keeps nothing; the PDF goes straight from Daisho to Discord.
 - Make the channel **private**. Reports carry calendars and to-do lists; `/pdc dispatches channel` warns when the channel is open to everyone.
 

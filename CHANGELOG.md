@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.7.0 (2026-10-14): dispatches tag who they're for
+
+- A dispatch can name the Discord user it's for (`mention`, a bare user ID, from The Magical Samurai 1.27.0). Ursula puts their tag at the front of the post and lets only that one mention through; `@everyone`, roles and anyone else written in the title or text still can't ping.
+- She only tags someone who's in the server and can see the dispatch channel. Otherwise the report is still posted, untagged, and Daisho's Dispatches screen says why.
+
 ## 1.6.0 (2026-10-14): dispatches
 
 - **Dispatches.** Finished reports that something outside Discord hands to The Magical Samurai (KRANG's briefings, from Boxer's PC) arrive as a `dispatch.post` change. Ursula fetches the PDF from Daisho with her module token, checks it's the file the change names (SHA-256), a PDF, and under Discord's 10 MB, and posts it to the dispatch channel with its title in bold and a few lines of text. Mentions are off, so a report can't ping anyone.
