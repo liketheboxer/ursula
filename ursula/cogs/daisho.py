@@ -19,6 +19,7 @@ token). Without them it does nothing, and if Daisho is down Ursula carries on as
 from __future__ import annotations
 
 import asyncio
+import io
 import dataclasses
 import hashlib
 import json
@@ -33,6 +34,7 @@ import discord
 from discord.ext import commands, tasks
 
 from .. import presence_logic as PL
+from .. import dispatch_logic as DL
 from .. import images, links
 from ..articles_logic import (ACTIONS, COOLDOWN_SCOPES, MATCHES, MAX_ACTIONS, MAX_REPLIES, SCHEDULE, TRIGGERS,
                               action_problem, clean_name, next_run, parse_schedule, server_emoji, split_keywords)
@@ -109,6 +111,23 @@ class SamuraiClient:
             raise RuntimeError("picture doesn't match its name")
         return data
 
+    async def dispatch_file(self, dispatch_id: int, sha: str) -> bytes:
+        """A dispatch's PDF (1.6.0). Raises DispatchProblem if it's gone, too big, or not the file named."""
+        s = await self._s()
+        async with s.get(f"{self.base}/dispatches/{int(dispatch_id)}/file",
+                         timeout=aiohttp.ClientTimeout(total=60)) as resp:
+            if resp.status == 404:
+                raise DL.DispatchProblem("Its file is no longer waiting on Daisho (it may have gone out already).")
+            if resp.status != 200:
+                raise RuntimeError(f"dispatch {dispatch_id}: {resp.status}")
+            data = b""
+            async for chunk in resp.content.iter_chunked(65536):
+                data += chunk
+                if len(data) > DL.MAX_BYTES:
+                    raise DL.DispatchProblem("That PDF is too big for Discord.")
+        DL.check_file(data, sha)
+        return data
+
     async def close(self) -> None:
         if self._session is not None:
             await self._session.close()
@@ -150,6 +169,8 @@ SETTINGS = {
     "music_enabled": ("bool", 0, 1), "music_youtube": ("bool", 0, 1), "music_dj_role_id": ("role", 0, 0),
     "music_channel_id": ("text", 0, 0), "music_idle_minutes": ("int", 1, 120), "music_volume": ("int", 1, 150),
     "music_stay": ("bool", 0, 1),
+    # dispatches (1.6.0): where reports handed over by Daisho are posted; it needs Attach Files too
+    "dispatch_channel_id": ("text", 0, 0),
     # birthdays (1.5.0): the channel switches announcements on; the hour is in the server's time zone
     "birthday_channel_id": ("text", 0, 0), "birthday_hour": ("int", 0, 23), "birthday_role_id": ("role", 0, 0),
     # the Ansible's first bridge (1.4.0: the rest via ansible.link/unlink/enable); a new channel or room goes
@@ -438,6 +459,32 @@ class Daisho(commands.Cog):
             return {"enabled": False, "loaded": False, "queue": []}
         return await cog.state(guild)
 
+    # ------------------------------------------------------------ applying: dispatches (1.6.0)
+    async def apply_dispatch_post(self, guild, payload: dict) -> str:
+        """Post a report handed over through Daisho (1.6.0): fetch its PDF, check it, attach it."""
+        try:
+            did, title, text, filename, sha = DL.check_payload(payload)
+        except DL.DispatchProblem as e:
+            raise ApplyError(str(e))
+        s = await self.bot.db.get_settings(guild.id)
+        if not s.dispatch_channel_id:
+            raise ApplyError("No dispatch channel is set. Pick one on Daisho's Dispatches screen or with "
+                             "/pdc dispatches channel, then send it again.")
+        channel = guild.get_channel(s.dispatch_channel_id)
+        if channel is None or not hasattr(channel, "send"):
+            raise ApplyError("The dispatch channel no longer exists. Pick another, then send it again.")
+        perms = channel.permissions_for(guild.me)
+        if not (perms.view_channel and perms.send_messages and getattr(perms, "attach_files", False)):
+            raise ApplyError(f"Ursula can't post files in #{getattr(channel, 'name', 'the dispatch channel')}: she "
+                             "needs View Channel, Send Messages and Attach Files there.")
+        try:
+            data = await self.client.dispatch_file(did, sha)
+        except DL.DispatchProblem as e:
+            raise ApplyError(str(e))
+        await channel.send(DL.message(title, text), file=discord.File(io.BytesIO(data), filename=filename),
+                           allowed_mentions=discord.AllowedMentions.none())
+        return f"Posted in #{getattr(channel, 'name', 'the dispatch channel')}."
+
     # ------------------------------------------------------------ applying: settings
     def _check_value(self, guild, key: str, value):
         kind, lo, hi = SETTINGS[key]
@@ -489,6 +536,8 @@ class Daisho(commands.Cog):
         if kind == "text" and not (perms.view_channel and perms.send_messages and perms.embed_links):
             raise ApplyError(f"Ursula can't post in #{channel.name}: it needs View Channel, Send Messages "
                              "and Embed Links there.")
+        if key == "dispatch_channel_id" and not getattr(perms, "attach_files", False):
+            raise ApplyError(f"Ursula can't attach files in #{channel.name}: dispatches need Attach Files there.")
         if kind == "category" and not perms.manage_channels:
             raise ApplyError(f"Ursula needs Manage Channels in {channel.name} to open voice channels there.")
         return value
@@ -1250,6 +1299,7 @@ class Daisho(commands.Cog):
 
 HANDLERS = {
     "settings.update": Daisho.apply_settings,
+    "dispatch.post": Daisho.apply_dispatch_post,
     "ansible.link": Daisho.apply_ansible_link,
     "ansible.unlink": Daisho.apply_ansible_unlink,
     "ansible.enable": Daisho.apply_ansible_enable,

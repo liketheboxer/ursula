@@ -486,6 +486,10 @@ MIGRATIONS: list[str] = [
     UPDATE ansible_links SET channel_id =
         (SELECT ansible_channel_id FROM guild_settings g WHERE g.guild_id = ansible_links.guild_id);
     """,
+    # 26: dispatches (1.6.0): reports The Magical Samurai hands over to post as a PDF
+    """
+    ALTER TABLE guild_settings ADD COLUMN dispatch_channel_id INTEGER;
+    """,
 ]
 
 
@@ -541,6 +545,7 @@ class GuildSettings:
     presence_text: str | None = None
     presence_music: int = 1
     lobby_minutes: int = 60          # the lobby thread opens this long before an event (0: no lobby)
+    dispatch_channel_id: int | None = None   # where dispatches are posted (1.6.0); a private channel
 
 
 @dataclass
@@ -609,7 +614,7 @@ class Boarding:
     reminded_at: str | None = None
 
 
-_SETTING_COLUMNS = {"lobby_minutes", "presence_status", "presence_kind", "presence_text", "presence_music", "ansible_enabled", "ansible_channel_id", "ansible_room", "ansible_webhook_id", "ledger_reminders", "music_enabled", "music_youtube", "music_dj_role_id", "music_channel_id",
+_SETTING_COLUMNS = {"dispatch_channel_id", "lobby_minutes", "presence_status", "presence_kind", "presence_text", "presence_music", "ansible_enabled", "ansible_channel_id", "ansible_room", "ansible_webhook_id", "ledger_reminders", "music_enabled", "music_youtube", "music_dj_role_id", "music_channel_id",
                     "music_idle_minutes", "music_volume", "music_stay", "parley_enabled", "parley_budget_cents", "parley_daily", "parley_kagi_daily",
                     "shipslog_channel_id", "shipslog_weekday", "shipslog_hour", "shipslog_last",
                     "crowsnest_enabled", "forum_channel_id", "gangplank_enabled", "intro_channel_id", "pending_role_id", "harbormaster_role_id",

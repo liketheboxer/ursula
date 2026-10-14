@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.6.0 (2026-10-14): dispatches
+
+- **Dispatches.** Finished reports that something outside Discord hands to The Magical Samurai (KRANG's briefings, from Boxer's PC) arrive as a `dispatch.post` change. Ursula fetches the PDF from Daisho with her module token, checks it's the file the change names (SHA-256), a PDF, and under Discord's 10 MB, and posts it to the dispatch channel with its title in bold and a few lines of text. Mentions are off, so a report can't ping anyone.
+- **`/pdc dispatches channel`** and **`off`**; `/pdc settings` shows it. The channel needs View Channel, Send Messages and Attach Files, and Ursula warns if it's open to everyone (reports carry calendars and to-do lists). Also on Daisho's new **Dispatches** screen (The Magical Samurai 1.26.0, Ursula module 1.5.0), which is where dispatch keys are made.
+- A dispatch with no channel set, or no Attach Files there, fails with the reason; it can be sent again from Daisho.
+- Migration 26 adds `dispatch_channel_id` to the server's settings. Nothing else to set up beyond picking a channel.
+
 ## 1.5.0 (2026-10-09): birthdays
 
 - **Birthdays**, back from PlunderBot. Members save their own with `/birthday set` (month and day; the year is never asked for or stored), and `/birthday mine`, `remove` and `upcoming` (the next ten, names shown but nobody pinged).

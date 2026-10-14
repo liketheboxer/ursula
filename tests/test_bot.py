@@ -39,7 +39,8 @@ async def test_command_tree(bot):
     assert isinstance(pdc, app_commands.Group)
     assert pdc.guild_only and pdc.default_permissions.manage_guild
     assert {c.name for c in pdc.commands} == {"settings", "timezone", "gatherings", "regions", "salas", "ansible",
-                                              "status", "birthdays"}
+                                              "status", "birthdays", "dispatches"}
+    assert {c.name for c in pdc.get_command("dispatches").commands} == {"channel", "off"}
     assert {c.name for c in pdc.get_command("birthdays").commands} == {"channel", "hour", "role", "off"}
     assert {c.name for c in top["birthday"].commands} == {"set", "remove", "mine", "upcoming"}
     assert {c.name for c in pdc.get_command("status").commands} == {"set", "music", "show"}

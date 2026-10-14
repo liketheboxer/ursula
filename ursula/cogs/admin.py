@@ -34,6 +34,7 @@ class Admin(commands.GroupCog, group_name="pdc", group_description="Ursula's set
     birthdays = app_commands.Group(name="birthdays", description="Where and when birthdays are announced")
     ansible = app_commands.Group(name="ansible", description="The Ansible: mirror channels to Matrix rooms")
     status = app_commands.Group(name="status", description="What shows under Ursula's name in Discord")
+    dispatches = app_commands.Group(name="dispatches", description="Where reports handed over by Daisho are posted")
 
     def __init__(self, bot):
         self.bot = bot
@@ -51,6 +52,7 @@ class Admin(commands.GroupCog, group_name="pdc", group_description="Ursula's set
             f"Gathering cards: {f'<#{s.voyage_channel_id}>' if s.voyage_channel_id else 'wherever /gathering call is used'}\n"
             f"Salas (music): {'on' if s.music_enabled else 'off'}\n"
             f"Birthdays: {await self.birthdays_line(interaction.guild_id, s)}\n"
+            f"Dispatches: {f'<#{s.dispatch_channel_id}>' if s.dispatch_channel_id else 'off (no channel set)'}\n"
             f"The Ansible: {await ansible.describe_guild(interaction.guild_id) if ansible else 'not running'}"
         )
         await interaction.response.send_message(text, ephemeral=True,
@@ -320,6 +322,28 @@ class Admin(commands.GroupCog, group_name="pdc", group_description="Ursula's set
         self._daisho()
         await interaction.response.send_message(
             "Birthdays won't be announced. Members can still save theirs, and nothing on file is lost.", ephemeral=True)
+
+    # ------------------------------------------------------------ dispatches (1.6.0)
+    @dispatches.command(name="channel", description="Where dispatches (reports from Daisho) are posted; make it private")
+    async def dispatch_channel(self, interaction: discord.Interaction, channel: discord.TextChannel) -> None:
+        perms = channel.permissions_for(interaction.guild.me)
+        if not (perms.view_channel and perms.send_messages and perms.attach_files):
+            await interaction.response.send_message(f"Ursula can't post files in {channel.mention}: she needs View "
+                                                    "Channel, Send Messages and Attach Files there.", ephemeral=True)
+            return
+        await self.bot.db.update_settings(interaction.guild_id, dispatch_channel_id=channel.id)
+        self._daisho()
+        everyone = channel.permissions_for(interaction.guild.default_role)
+        warn = (" It's open to everyone in the server; reports can carry calendars and to-do lists, so a private "
+                "channel is better.") if everyone.view_channel else ""
+        await interaction.response.send_message(f"Dispatches will be posted in {channel.mention}.{warn}", ephemeral=True)
+
+    @dispatches.command(name="off", description="Stop posting dispatches (they'll fail until a channel is set)")
+    async def dispatch_off(self, interaction: discord.Interaction) -> None:
+        await self.bot.db.update_settings(interaction.guild_id, dispatch_channel_id=None)
+        self._daisho()
+        await interaction.response.send_message("Dispatches are off. Any that arrive will fail (and can be sent "
+                                                "again from Daisho once a channel is set).", ephemeral=True)
 
     def _daisho(self) -> None:
         cog = self.bot.get_cog("Daisho")

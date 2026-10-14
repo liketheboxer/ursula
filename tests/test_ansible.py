@@ -655,9 +655,11 @@ async def test_the_old_single_link_moves_into_a_bridge(tmp_path):
     db = Database(str(tmp_path / "old.db"))
     await db.connect()
     try:
-        await db.conn.execute("DELETE FROM schema_version WHERE version = ?", (len(MIGRATIONS),))
+        # back to before migration 25 (1.4.0), and the ones after it (26: dispatches, 1.6.0)
+        await db.conn.execute("DELETE FROM schema_version WHERE version >= 25")
         await db.conn.executescript("DROP INDEX ansible_bridges_room; DROP TABLE ansible_bridges;"
-                                    "ALTER TABLE ansible_links DROP COLUMN channel_id;")
+                                    "ALTER TABLE ansible_links DROP COLUMN channel_id;"
+                                    "ALTER TABLE guild_settings DROP COLUMN dispatch_channel_id;")
         await db.update_settings(10, ansible_enabled=1, ansible_channel_id=20, ansible_room=f" {ROOM} ",
                                  ansible_webhook_id=800)
         await db.update_settings(11, ansible_enabled=0, ansible_channel_id=30,

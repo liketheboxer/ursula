@@ -2,7 +2,7 @@
 
 **U**nconventional **R**eplies, **S**chedules & **U**nwarranted **L**eftist **A**phorisms: Anarres's Discord bot, named for Ursula K. Le Guin.
 
-A Python Discord bot (discord.py 2.x) that runs under Exocomp and reports telemetry to The Magical Samurai. Ursula was forked from PlunderBot 1.6.3 and keeps six of its features (birthdays came back in 1.5.0), renamed after Le Guin's books (mostly *The Dispossessed*), plus one new one:
+A Python Discord bot (discord.py 2.x) that runs under Exocomp and reports telemetry to The Magical Samurai. Ursula was forked from PlunderBot 1.6.3 and keeps six of its features (birthdays came back in 1.5.0), renamed after Le Guin's books (mostly *The Dispossessed*), plus two new ones:
 
 | Ursula | What it is | From PlunderBot |
 |---|---|---|
@@ -13,6 +13,7 @@ A Python Discord bot (discord.py 2.x) that runs under Exocomp and reports teleme
 | **Salas** (`/play`, `/salas`) | Music in voice channels | Jukebox |
 | **Birthdays** (`/birthday`) | Members save their own; Ursula marks the day | Birthdays (1.5.0) |
 | **The Ansible** (`/pdc ansible`) | Channels mirrored to Matrix rooms, both ways, each to its own room | new |
+| **Dispatches** (`/pdc dispatches`) | Reports handed over through The Magical Samurai, posted as a PDF in a private channel | new |
 | **The PDC** (`/pdc`) | Settings: Production and Distribution Coordination | Admin |
 | **The Analogy** | The manual, in Daisho | Manual |
 
@@ -41,6 +42,7 @@ Inside the code the PlunderBot names stay (a gathering is a `Voyage`, a custom a
 | `/pdc regions auto` | Manage Server | Match region roles to time zones. Also `set`, `clear`, `list` |
 | `/birthday set` | Everyone | Save your birthday: month and day, never the year. Also `mine`, `remove`, and `upcoming` (the next ten, without pinging anyone) |
 | `/pdc birthdays channel` | Manage Server | Where birthdays are announced (this switches it on). Also `hour` (in the server's time zone), `role` (worn for the day) and `off` |
+| `/pdc dispatches channel` | Manage Server | Where dispatches are posted (make it private; Ursula needs Attach Files there). Also `off` |
 | `/pdc salas status` | Manage Server | How music is set up. Also `enable`, `youtube`, `djrole`, `channel`, `settings` |
 | `/pdc status set` | Manage Server | The line under Ursula's name, how it's worded (Playing, Listening to...) and her dot. Also `music` (Now Playing: song while Salas plays; on by default) and `show` |
 | `/pdc ansible link` | Manage Server | Mirror a channel and a Matrix room, and switch it on. Run it again for each channel you want mirrored; linking a channel that's already mirrored moves it to the new room |
@@ -77,6 +79,13 @@ The same as PlunderBot's Articles: **when** something happens (words said, a mem
 - At the set hour (9 AM by default, in the server's time zone) Ursula announces the day's birthdays in the PDC's chosen channel, pinging only the people celebrating, and gives them the birthday role until the next day. If she was offline at that hour, she announces later that day, never twice.
 - With no channel set nothing is announced, but dates are still saved. Someone who leaves the server has their date deleted.
 
+### How Dispatches work
+
+- Something outside Discord that has a **dispatch key** (KRANG's morning and evening briefings, sent from Boxer's PC) hands The Magical Samurai a finished report as a PDF. Keys are made on Ursula's **Dispatches** screen there, and can do nothing else.
+- Daisho queues it like any other change. Within about 15 seconds Ursula fetches the PDF with her module token, checks it's exactly the file the change names (its SHA-256) and a real PDF under Discord's 10 MB, and posts it to the dispatch channel: the title in bold, a few lines of text, and the PDF attached. Mentions are switched off, so nothing in a report can ping anyone.
+- No channel set, or no **Attach Files** there: the dispatch fails with the reason, and can be sent again from the Dispatches screen once that's fixed. Ursula keeps nothing; the PDF goes straight from Daisho to Discord.
+- Make the channel **private**. Reports carry calendars and to-do lists; `/pdc dispatches channel` warns when the channel is open to everyone.
+
 ### How Salas works
 
 The same as PlunderBot's music: SoundCloud, Bandcamp, Twitch, radio, plain audio links, Spotify links (looked up elsewhere), and YouTube when the PDC switches it on (with a throwaway account's cookies). A DJ role can be set; the Salas screen in Daisho steers it too. Links must be on the public internet.
@@ -92,7 +101,7 @@ Ursula's module in The Magical Samurai shows Settings (with the Ansible), Syndic
 1. In the [Discord Developer Portal](https://discord.com/developers/applications), create an application named **Ursula** and give her an avatar.
 2. **Bot** tab: turn on **Server Members Intent** and **Message Content Intent** (Customs, imports and the Ansible need it). Leave Presence off.
 3. **Bot** tab: **Reset Token** and keep it for Exocomp. Never paste it in chat or commit it.
-4. **OAuth2 › URL Generator**: scopes `bot` and `applications.commands`; permissions **View Channels**, **Send Messages**, **Embed Links**, **Attach Files**, **Read Message History**, **Add Reactions**, **Manage Roles**, **Manage Events**, **Manage Webhooks** (the Ansible), **Manage Messages** (customs that pin), **Create Public Threads** and **Send Messages in Threads** (lobby threads), **Connect** and **Speak** (Salas). Open the URL and add Ursula to Anarres.
+4. **OAuth2 › URL Generator**: scopes `bot` and `applications.commands`; permissions **View Channels**, **Send Messages**, **Embed Links**, **Attach Files** (dispatches), **Read Message History**, **Add Reactions**, **Manage Roles**, **Manage Events**, **Manage Webhooks** (the Ansible), **Manage Messages** (customs that pin), **Create Public Threads** and **Send Messages in Threads** (lobby threads), **Connect** and **Speak** (Salas). Open the URL and add Ursula to Anarres.
 5. **Server Settings › Roles**: drag Ursula's role above any role she should hand out (Syndicates and Customs).
 
 ### 2. Ursula's Matrix account
@@ -130,7 +139,7 @@ The database is `/data/ursula.db`; the container runs as user 10001 (`ursula`).
 
 ## Telemetry
 
-Gauges `voyages_scheduled`, `ansible_up` (1 while the mirror is syncing), `ansible_bridges` (how many channels are being mirrored) and `birthdays_on_file`. Background errors are reported as `voyage-clock`, `articles-clock`, `ansible`, `birthday-announcer` and `daisho`.
+Gauges `voyages_scheduled`, `ansible_up` (1 while the mirror is syncing), `ansible_bridges` (how many channels are being mirrored) and `birthdays_on_file`. Background errors are reported as `voyage-clock`, `articles-clock`, `ansible`, `birthday-announcer` and `daisho` (which includes dispatches).
 
 ## Developing
 
