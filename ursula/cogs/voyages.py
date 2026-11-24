@@ -22,7 +22,9 @@ from ..timeutil import PING_COOLDOWN, iso, now_utc, zone
 from ..db import Voyage
 from ..mentions import send_pinging
 from .lobby import LobbyMixin
-from ..voyage_logic import (LOBBY_CHOICES, format_lobby, lobby_due, parse_lobby, REMINDER_PRESETS, ParseError, describe_repeat, due_reminder, following,
+from ..voyage_logic import (REPOST_CHOICES, format_repost, format_wait, held_until, lobby_for, parse_repost,
+                            repost_at, repost_for,
+                            LOBBY_CHOICES, format_lobby, lobby_due, parse_lobby, REMINDER_PRESETS, ParseError, describe_repeat, due_reminder, following,
                             format_reminders, format_skips, is_weekday_name, overdue_reminders, parse_date,
                             nth_of, parse_reminders, parse_skips, parse_time, placement, render_voyage, repeat_choices,
                             resolve_repeat, split_zone, to_utc, upcoming_dates, zone_label)
@@ -37,6 +39,9 @@ PING_CHOICES = [app_commands.Choice(name=label, value=key) for key, label in PIN
 LOBBY_OPTIONS = [app_commands.Choice(name="The server's default", value="default"),
                  app_commands.Choice(name="No lobby thread", value="off")] + [
     app_commands.Choice(name=format_lobby(m), value=f"{m}m") for m in LOBBY_CHOICES]
+REPOST_OPTIONS = [app_commands.Choice(name="The server's default", value="default"),
+                  app_commands.Choice(name="As soon as the last one starts", value="now")] + [
+    app_commands.Choice(name=f"{format_wait(m)} after the last one ends", value=f"{m}m") for m in REPOST_CHOICES]
 BUTTONS = {
     "aboard": ("Going", discord.ButtonStyle.success),
     "maybe": ("Maybe", discord.ButtonStyle.secondary),
@@ -217,6 +222,8 @@ class Voyages(LobbyMixin, commands.GroupCog, group_name="gathering", group_descr
 
     async def sync_event(self, guild: discord.Guild, v: Voyage, action: str = "upsert") -> int | None:
         """Keep the matching Discord Event in step. Failures are logged, never fatal."""
+        if v.held and action == "upsert":
+            return v.event_id          # its card isn't up yet; the Event goes up with it
         start = datetime.fromisoformat(v.starts_at)
         channel = guild.get_channel(v.channel_id)
         description = (v.description or "")[:800]
@@ -274,8 +281,9 @@ class Voyages(LobbyMixin, commands.GroupCog, group_name="gathering", group_descr
         duration="How long it runs, in minutes",
         image="A picture for the card",
         notify="When to tag the role (default: when it's posted)",
-        lobby="When the lobby thread opens before the start (default: the server's setting)")
-    @app_commands.choices(notify=PING_CHOICES, lobby=LOBBY_OPTIONS)
+        lobby="When the lobby thread opens before the start (default: the server's setting)",
+        repeat_wait="For a repeating gathering: when the next one's card goes up (default: the server's setting)")
+    @app_commands.choices(notify=PING_CHOICES, lobby=LOBBY_OPTIONS, repeat_wait=REPOST_OPTIONS)
     async def call(self, interaction: discord.Interaction, title: app_commands.Range[str, 1, 80],
                    date: str, time: str, place: app_commands.Range[str, 1, 100] | None = None,
                    role: discord.Role | None = None, seats: app_commands.Range[int, 1, 999] | None = None,
@@ -284,7 +292,8 @@ class Voyages(LobbyMixin, commands.GroupCog, group_name="gathering", group_descr
                    duration: app_commands.Range[int, 15, 720] = 120,
                    image: discord.Attachment | None = None,
                    notify: app_commands.Choice[str] | None = None, repeat_ends: str | None = None,
-                   lobby: app_commands.Choice[str] | None = None) -> None:
+                   lobby: app_commands.Choice[str] | None = None,
+                   repeat_wait: app_commands.Choice[str] | None = None) -> None:
         guild = interaction.guild
         tz, whose = await self.reading_zone(interaction.user.id, guild.id)
         now = now_utc()
@@ -332,7 +341,8 @@ class Voyages(LobbyMixin, commands.GroupCog, group_name="gathering", group_descr
                               repeat=repeat_code, ping_role=notify.value if notify else "posted",
                               image=image_name, repeat_until=until, place=(place or "").strip() or None,
                               notify_role_id=role.id if role else None,
-                              lobby_minutes=parse_lobby(lobby.value) if lobby else None)
+                              lobby_minutes=parse_lobby(lobby.value) if lobby else None,
+                              repost_minutes=parse_repost(repeat_wait.value) if repeat_wait else None)
         if v is None:
             await interaction.followup.send(voice.say("crew_cant_post"), ephemeral=True)
             return
@@ -346,7 +356,7 @@ class Voyages(LobbyMixin, commands.GroupCog, group_name="gathering", group_descr
                      minutes: list[int], repeat: str, ping_role: str, image: str | None = None,
                      repeat_until: str | None = None, place: str | None = None,
                      notify_role_id: int | None = None,
-                     lobby_minutes: int | None = None) -> Voyage | None:
+                     lobby_minutes: int | None = None, repost_minutes: int | None = None) -> Voyage | None:
         """Save a new gathering with its caller Going and post its card. None if the card couldn't go up.
         Used by /gathering call and by the Daisho screens."""
         now = now_utc()
@@ -357,7 +367,7 @@ class Voyages(LobbyMixin, commands.GroupCog, group_name="gathering", group_descr
             reminders=",".join(str(m) for m in minutes), repeat=repeat,
             created_at=iso(now), image=image, ping_role=ping_role,
             repeat_until=repeat_until if repeat != "none" else None, lobby_minutes=lobby_minutes,
-            place=place, notify_role_id=notify_role_id)
+            place=place, notify_role_id=notify_role_id, repost_minutes=repost_minutes)
         v = await self.bot.db.update_voyage(v.id, series_id=v.id)
         await self.bot.db.set_rsvp(v.id, organizer_id, "aboard", iso(now))
         try:
@@ -490,6 +500,8 @@ class Voyages(LobbyMixin, commands.GroupCog, group_name="gathering", group_descr
         head = describe_repeat(v.repeat)
         if v.repeat_until:
             head += f", until {Date.fromisoformat(v.repeat_until).strftime('%a %b %-d, %Y')}"
+        if v.repost_minutes is not None:
+            head += f"; each next card goes up {format_repost(repost_for(v.repost_minutes, 0))}"
         lines = [f"**{v.title}**: {head}.", f"- <t:{int(datetime.fromisoformat(v.starts_at).timestamp())}:D> (this one)"]
         for d, skipped in dates:
             lines.append(f"- ~~{d.strftime('%a %b %-d, %Y')}~~ skipped" if skipped else f"- {d.strftime('%a %b %-d, %Y')}")
@@ -568,8 +580,9 @@ class Voyages(LobbyMixin, commands.GroupCog, group_name="gathering", group_descr
                            repeat_ends="The last date the series runs, or never",
                            skip="Skip one date of the series (this gathering's own date calls off just this one)",
                            unskip="Put a skipped date back",
-                           lobby="When the lobby thread opens before the start")
-    @app_commands.choices(notify=PING_CHOICES, lobby=LOBBY_OPTIONS)
+                           lobby="When the lobby thread opens before the start",
+                           repeat_wait="For a repeating gathering: when each next card goes up")
+    @app_commands.choices(notify=PING_CHOICES, lobby=LOBBY_OPTIONS, repeat_wait=REPOST_OPTIONS)
     async def edit(self, interaction: discord.Interaction, voyage: str,
                    title: app_commands.Range[str, 1, 80] | None = None, date: str | None = None,
                    time: str | None = None, place: app_commands.Range[str, 1, 100] | None = None,
@@ -579,7 +592,8 @@ class Voyages(LobbyMixin, commands.GroupCog, group_name="gathering", group_descr
                    image: discord.Attachment | None = None, remove_image: bool = False,
                    notify: app_commands.Choice[str] | None = None, repeat: str | None = None,
                    repeat_ends: str | None = None, skip: str | None = None, unskip: str | None = None,
-                   lobby: app_commands.Choice[str] | None = None) -> None:
+                   lobby: app_commands.Choice[str] | None = None,
+                   repeat_wait: app_commands.Choice[str] | None = None) -> None:
         v = await self._fetch_manageable(interaction, voyage)
         if v is None:
             return
@@ -592,7 +606,7 @@ class Voyages(LobbyMixin, commands.GroupCog, group_name="gathering", group_descr
                 v, interaction.user.id, title=title, date=date, time=time, description=description,
                 reminders=reminders, seats=seats, notify=notify.value if notify else None, repeat=repeat,
                 repeat_ends=repeat_ends, skip=skip, unskip=unskip, place=place,
-                lobby=lobby.value if lobby else None)
+                lobby=lobby.value if lobby else None, repeat_wait=repeat_wait.value if repeat_wait else None)
         except EditRefused as e:
             await interaction.response.send_message(voice.say(e.key, **e.kw), ephemeral=True)
             return
@@ -630,7 +644,7 @@ class Voyages(LobbyMixin, commands.GroupCog, group_name="gathering", group_descr
                         seats: int | None = None, notify: str | None = None, repeat: str | None = None,
                         repeat_ends: str | None = None, skip: str | None = None, unskip: str | None = None,
                         place: str | None = None,
-                        lobby: str | None = None):
+                        lobby: str | None = None, repeat_wait: str | None = None):
         """Work out the changes an edit makes, as /gathering edit and Parley (1.6.0) both ask for it: the times
         read in the member's own zone (or one they typed). Returns (changes, skip_this, tz, whose, starts);
         raises EditRefused with the voice line to answer with."""
@@ -657,6 +671,10 @@ class Voyages(LobbyMixin, commands.GroupCog, group_name="gathering", group_descr
                 changes.update(reminders=",".join(str(m) for m in parse_reminders(reminders)), reminders_sent="")
             if lobby is not None:
                 changes["lobby_minutes"] = parse_lobby(lobby)
+            if repeat_wait is not None:
+                wait = parse_repost(repeat_wait)
+                if wait != v.repost_minutes:
+                    changes["repost_minutes"] = wait
             if repeat or repeat_ends or skip or unskip or (starts is not None and v.repeat != "none"):
                 stz = await self.tz(v.guild_id)
                 today = datetime.now(stz).date()
@@ -696,6 +714,10 @@ class Voyages(LobbyMixin, commands.GroupCog, group_name="gathering", group_descr
             text += "\n" + self.zone_note(tz, whose, starts)
         if {"repeat", "repeat_until", "skips"} & set(changes) or skip_this:
             text += "\n" + self.series_text(v, await self.series_dates(v, count=5))
+        elif "repost_minutes" in changes and v.repeat != "none":
+            text += "\nEach next card goes up " + format_repost(await self.repost_minutes(v)) + "."
+        if v.held:
+            text += f"\nIts card goes up <t:{int(datetime.fromisoformat(v.post_at).timestamp())}:R>."
         return text
 
     @app_commands.command(name="series", description="See the coming dates of a repeating gathering")
@@ -760,8 +782,15 @@ class Voyages(LobbyMixin, commands.GroupCog, group_name="gathering", group_descr
                 await self._reset_reminder_baseline(voyage_id)
             if ("starts_at" in changes or "lobby_minutes" in changes) and current.lobby_state in ("opening", "failed"):
                 changes = {**changes, "lobby_state": ""}
+            if current.held and "repost_minutes" in changes:
+                changes = {**changes, "post_at": await self.replan_post(dataclasses.replace(current, **changes))}
             v = await self.bot.db.update_voyage(voyage_id, **changes)
             promoted = await self._promote_waitlist(v)
+        if current.held and not v.held and not v.message_id:      # its wait is over now: up it goes
+            try:
+                v = await self.post(guild, v, announce_role=False)
+            except (discord.HTTPException, LookupError) as e:
+                log.warning("Couldn't post gathering %s after its wait changed: %s", v.id, e)
         await self.refresh(guild, v, new_image="image" in changes)
         await self.sync_event(guild, v)
         if v.lobby_state == "open" and ("starts_at" in changes or "lobby_minutes" in changes):
@@ -794,7 +823,7 @@ class Voyages(LobbyMixin, commands.GroupCog, group_name="gathering", group_descr
         await self.refresh(guild, v)
         await self.sync_event(guild, v, "cancel")
         if v.repeat != "none" and not whole_series:
-            await self.schedule_next(guild, v)
+            await self.schedule_next(guild, v, wait=False)
         return True
 
     edit.autocomplete("voyage")(_manageable)
@@ -824,6 +853,8 @@ class Voyages(LobbyMixin, commands.GroupCog, group_name="gathering", group_descr
             rs = await self.bot.db.rsvps(v.id)
             seats = f"{len(rs.aboard)}/{v.capacity}" if v.capacity else str(len(rs.aboard))
             state = " (under way)" if v.status == "started" else ""
+            if v.held:
+                state = f" (card goes up <t:{int(datetime.fromisoformat(v.post_at).timestamp())}:R>)"
             lines.append(f"- <t:{stamp}:f> **{v.title}**{state}, {seats} going {_link(v)}")
         await interaction.response.send_message("\n".join(lines)[:1990], ephemeral=True,
                                                 allowed_mentions=discord.AllowedMentions.none())
@@ -935,6 +966,8 @@ class Voyages(LobbyMixin, commands.GroupCog, group_name="gathering", group_descr
         """Open the lobby thread, send a due reminder, or start it. Reads it fresh under the lock, so an edit
         or cancel that just happened is always respected."""
         opening, replaced = False, set()
+        if not await self.post_held(guild, voyage_id, now):
+            return                     # still waiting its turn
         async with self.lock:
             v = await self.bot.db.get_voyage(voyage_id)
             if v is None or v.status != "scheduled":
@@ -1041,8 +1074,10 @@ class Voyages(LobbyMixin, commands.GroupCog, group_name="gathering", group_descr
         await self.refresh(guild, v)
         await self.sync_event(guild, v, "end")
 
-    async def schedule_next(self, guild: discord.Guild, v: Voyage) -> Voyage | None:
-        """Post the next gathering in v's series, unless the series already has one waiting."""
+    async def schedule_next(self, guild: discord.Guild, v: Voyage, wait: bool = True) -> Voyage | None:
+        """Post the next gathering in v's series, unless the series already has one waiting. With a wait set
+        (/pdc gatherings repeatwait, or the series' own), it's saved now and its card goes up later; wait=False
+        (a called-off or skipped gathering) posts it straight away."""
         series = v.series_id or v.id
         async with self.lock:
             waiting = [x for x in await self.bot.db.voyages_with_status("scheduled", guild_id=guild.id)
@@ -1060,20 +1095,64 @@ class Voyages(LobbyMixin, commands.GroupCog, group_name="gathering", group_descr
                             parse_skips(v.skips), after=now_utc(), at=at)
             if nxt is None:
                 return None
+            settings = await self.bot.db.get_settings(guild.id)
+            post_at = repost_at(datetime.fromisoformat(v.starts_at), v.duration_min or 120,
+                                repost_for(v.repost_minutes, settings.repost_minutes) if wait else 0, nxt,
+                                v.reminder_minutes, lobby_for(v.lobby_minutes, settings.lobby_minutes))
+            if post_at is not None and post_at <= now_utc():
+                post_at = None
             new = await self.bot.db.create_voyage(
                 guild_id=v.guild_id, channel_id=v.channel_id, organizer_id=v.organizer_id, title=v.title,
                 description=v.description, game_key=v.game_key, size_label=v.size_label, capacity=v.capacity,
                 starts_at=iso(nxt), duration_min=v.duration_min, reminders=v.reminders, repeat=v.repeat,
                 series_id=series, created_at=iso(now_utc()), image=v.image, ping_role=v.ping_role,
-                lobby_minutes=v.lobby_minutes,
+                lobby_minutes=v.lobby_minutes, repost_minutes=v.repost_minutes,
+                post_at=iso(post_at) if post_at else None,
                 repeat_until=v.repeat_until, place=v.place, notify_role_id=v.notify_role_id,
                 skips=format_skips(parse_skips(v.skips), after=nxt.astimezone(tz).date()))
             await self.bot.db.set_rsvp(new.id, v.organizer_id, "aboard", iso(now_utc()))
+        if new.held:
+            log.info("Series %s: gathering %s waits to be posted until %s", series, new.id, new.post_at)
+            return new
         try:
             return await self.post(guild, new, announce_role=False)
         except (discord.HTTPException, LookupError) as e:
             log.warning("Couldn't post the next gathering in series %s: %s", series, e)
             return new
+
+    async def repost_minutes(self, v: Voyage) -> int:
+        """How long after a gathering ends its series' next card waits (0: it goes up when this one starts)."""
+        settings = await self.bot.db.get_settings(v.guild_id)
+        return repost_for(v.repost_minutes, settings.repost_minutes)
+
+    async def replan_post(self, v: Voyage) -> str | None:
+        """A held gathering's post time worked out again (its wait changed), from the gathering before it."""
+        prev = await self.bot.db.previous_in_series(v.series_id or v.id, v.starts_at)
+        if prev is None:
+            return None
+        settings = await self.bot.db.get_settings(v.guild_id)
+        at = repost_at(datetime.fromisoformat(prev.starts_at), prev.duration_min or 120,
+                       repost_for(v.repost_minutes, settings.repost_minutes), datetime.fromisoformat(v.starts_at),
+                       v.reminder_minutes, lobby_for(v.lobby_minutes, settings.lobby_minutes))
+        return iso(at) if at is not None and at > now_utc() else None
+
+    async def post_held(self, guild: discord.Guild, voyage_id: int, now: datetime, force: bool = False) -> bool:
+        """Post a held gathering's card once its time comes (or sooner, so it's up before its first reminder
+        or lobby). True when its card is up (or it isn't held); False while it still waits."""
+        async with self.lock:
+            v = await self.bot.db.get_voyage(voyage_id)
+            if v is None or v.status != "scheduled" or not v.held:
+                return True
+            when = held_until(v.post_at, v.message_id, datetime.fromisoformat(v.starts_at), v.reminder_minutes,
+                              await self.lobby_minutes(v))
+            if not force and when is not None and now < when:
+                return False
+            v = await self.bot.db.update_voyage(v.id, post_at=None)
+        try:
+            await self.post(guild, v, announce_role=False)
+        except (discord.HTTPException, LookupError) as e:
+            log.warning("Couldn't post held gathering %s: %s", v.id, e)
+        return True
 
 
 async def setup(bot) -> None:

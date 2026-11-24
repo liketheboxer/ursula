@@ -41,7 +41,7 @@ from ..articles_logic import (ACTIONS, COOLDOWN_SCOPES, MATCHES, MAX_ACTIONS, MA
 from ..timeutil import iso, now_utc, valid_timezone, zone
 from ..discord_util import self_serve_problem
 from ..menu_logic import MAX_OPTIONS, button_text, is_emoji, slug
-from ..voyage_logic import (LOBBY_CHOICES, format_lobby, lobby_for, ParseError, describe_repeat, format_reminders, parse_reminders, repeat_choices,
+from ..voyage_logic import (REPOST_CHOICES, format_repost, repost_for, LOBBY_CHOICES, format_lobby, lobby_for, ParseError, describe_repeat, format_reminders, parse_reminders, repeat_choices,
                             resolve_repeat)
 
 log = logging.getLogger("ursula.daisho")
@@ -161,6 +161,7 @@ def _channel_kind(c) -> str | None:
 # key: (kind, low, high). Kinds match the screen: text, category, forum, role, bool, int, zone.
 SETTINGS = {
     "lobby_minutes": ("int", 0, 1440),         # the lobby thread, minutes before (0: none)
+    "repost_minutes": ("int", 0, 10080),       # a series' next card: minutes after the last one ends (0: when it starts)
     # the status under the bot's name: the dot, the kind of line, the line, and Now Playing while music plays
     "presence_status": ("choice", 0, 0), "presence_kind": ("choice", 0, 0), "presence_text": ("line", 0, 128),
     "presence_music": ("bool", 0, 1),
@@ -421,7 +422,8 @@ class Daisho(commands.Cog):
         out = []
         cog = self.bot.get_cog("Voyages")
         tz = await cog.tz(guild.id) if cog else None
-        lobby_default = (await self.bot.db.get_settings(guild.id)).lobby_minutes
+        settings = await self.bot.db.get_settings(guild.id)
+        lobby_default, repost_default = settings.lobby_minutes, settings.repost_minutes
         for v in vs:
             r = await self.bot.db.rsvps(v.id)
             series, choices = [], []
@@ -443,6 +445,10 @@ class Daisho(commands.Cog):
                         "lobby_minutes": v.lobby_minutes, "lobby_state": v.lobby_state,
                         "lobby": format_lobby(lobby_for(v.lobby_minutes, lobby_default)),
                         "lobby_thread_id": v.lobby_thread_id if v.lobby_state == "open" else None,
+                        # 1.8.0: when a series' next card goes up, and whether this one is still waiting for its turn
+                        "repost_minutes": v.repost_minutes,
+                        "repost": format_repost(repost_for(v.repost_minutes, repost_default)),
+                        "post_at": v.post_at if v.held else None,
                         "organizer_id": v.organizer_id, "organizer": self.name_of(guild, v.organizer_id),
                         "channel_id": v.channel_id, "message_id": v.message_id,
                         "aboard": [self.name_of(guild, u) for u in r.aboard],
@@ -1057,6 +1063,14 @@ class Daisho(commands.Cog):
 
 
     @staticmethod
+    def _repost(value) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, int) or (value and value not in REPOST_CHOICES):
+            raise ApplyError("Pick when the next card goes up from the list.")
+        return value
+
+    @staticmethod
     def _lobby(value) -> int | None:
         if value is None:
             return None
@@ -1116,6 +1130,10 @@ class Daisho(commands.Cog):
             lobby = self._lobby(p["lobby_minutes"])
             if lobby != v.lobby_minutes:
                 changes["lobby_minutes"] = lobby
+        if "repost_minutes" in p:
+            wait = self._repost(p["repost_minutes"])
+            if wait != v.repost_minutes:
+                changes["repost_minutes"] = wait
         if "ping_role" in p:
             if p["ping_role"] not in ("off", "posted", "reminders"):
                 raise ApplyError("Pick when the role is tagged.")
@@ -1245,7 +1263,8 @@ class Daisho(commands.Cog):
                              starts=starts, duration=duration, minutes=minutes, repeat=repeat, ping_role=ping,
                              repeat_until=until, image=image, place=self._place(p.get("place")),
                              notify_role_id=role_id,
-                             lobby_minutes=self._lobby(p.get("lobby_minutes")))
+                             lobby_minutes=self._lobby(p.get("lobby_minutes")),
+                             repost_minutes=self._repost(p.get("repost_minutes")))
         if v is None:
             raise ApplyError(f"Ursula couldn't post the gathering's card in #{channel.name}.")
         self.mark("voyages")

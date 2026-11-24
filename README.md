@@ -25,8 +25,8 @@ Inside the code the PlunderBot names stay (a gathering is a `Voyage`, a custom a
 |---|---|---|
 | `/ursula` | Everyone | Meet Ursula: the version, and an aphorism |
 | `/timezone set` | Everyone | Save your time zone (Pacific, ET, Europe/London…) so the times you type are read correctly. Also `show` and `clear` |
-| `/gathering call` | Everyone | Call a gathering: title, date (friday, tomorrow, 10/3), time (8pm, or 8pm ET), **place** (a voice channel, an address, a link), an optional **role** to tag (only roles the server lets anyone mention), places (empty for no limit), details, reminders (default 1 day and 1 hour before), repeat and its last date, length (default 2 hours), a picture, when to tag the role, and `lobby`: when its lobby thread opens (the server's default, none, or 15 minutes to a day before) |
-| `/gathering edit` | Whoever called it, or mods | Change any of that, including place and role (`remove_role` stops tagging); for a repeating gathering, how it repeats, its last date, and skip or unskip a date |
+| `/gathering call` | Everyone | Call a gathering: title, date (friday, tomorrow, 10/3), time (8pm, or 8pm ET), **place** (a voice channel, an address, a link), an optional **role** to tag (only roles the server lets anyone mention), places (empty for no limit), details, reminders (default 1 day and 1 hour before), repeat and its last date, length (default 2 hours), a picture, when to tag the role, `lobby`: when its lobby thread opens (the server's default, none, or 15 minutes to a day before), and for a repeating one `repeat_wait`: when each next card goes up (the server's default, as soon as the last one starts, or 1 hour to 3 days after it ends) |
+| `/gathering edit` | Whoever called it, or mods | Change any of that, including place and role (`remove_role` stops tagging); for a repeating gathering, how it repeats, its last date, when each next card goes up (`repeat_wait`), and skip or unskip a date |
 | `/gathering series` | Everyone | A repeating gathering's coming dates |
 | `/gathering cancel` | Whoever called it, or mods | Call it off, or with `whole_series:True` the whole series |
 | `/gathering list` | Everyone | What's on the board |
@@ -39,6 +39,7 @@ Inside the code the PlunderBot names stay (a gathering is a `Voyage`, a custom a
 | `/pdc timezone` | Manage Server | The server's time zone |
 | `/pdc gatherings channel` | Manage Server | Where gathering cards go (empty: wherever `/gathering call` is used) |
 | `/pdc gatherings lobby` | Manage Server | When each gathering's lobby thread opens (default 1 hour before; Off for none). Each gathering can pick its own |
+| `/pdc gatherings repeatwait` | Manage Server | When a repeating gathering's next card goes up: as soon as the last one starts (default), or 1 hour to 3 days after it ends. Always in time for its first reminder or lobby. Each series can pick its own |
 | `/pdc regions auto` | Manage Server | Match region roles to time zones. Also `set`, `clear`, `list` |
 | `/birthday set` | Everyone | Save your birthday: month and day, never the year. Also `mine`, `remove`, and `upcoming` (the next ten, without pinging anyone) |
 | `/pdc birthdays channel` | Manage Server | Where birthdays are announced (this switches it on). Also `hour` (in the server's time zone), `role` (worn for the day) and `off` |

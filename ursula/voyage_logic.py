@@ -477,3 +477,72 @@ def format_lobby(minutes: int) -> str:
     if not minutes:
         return "no lobby"
     return format_reminders([minutes])
+
+
+# ------------------------------------------------------------ when a repeating series posts its next card (Ursula 1.8.0)
+# By default the next gathering of a series goes up as soon as the last one starts. A wait holds it back until
+# a while after the last one ends (its start plus its length), so the channel isn't showing next week's card
+# while this week's is still going. It always goes up in time for its own first reminder or lobby thread.
+REPOST_CHOICES = [60, 180, 360, 720, 1440, 2880, 4320]
+REPOST_MAX = 7 * 1440
+REPOST_LEAD_MIN = 60          # the card is up at least this long before the start, whatever the wait says
+
+
+def repost_for(own: int | None, server_default: int | None) -> int:
+    """Minutes after the last gathering ends that the next card goes up (0: as soon as the last one starts)."""
+    minutes = server_default if own is None else own
+    return minutes if isinstance(minutes, int) and 0 < minutes <= REPOST_MAX else 0
+
+
+def parse_repost(text: str | None) -> int | None:
+    """"default" (or nothing): None, the server's setting. "now"/"0"/"off": 0, as soon as the last one starts.
+    Otherwise one time like the reminders take (12h, 1d), up to a week."""
+    t = (text or "").strip().lower()
+    if t in ("", "default", "server default"):
+        return None
+    if t in ("now", "off", "none", "no", "0", "start", "when it starts"):
+        return 0
+    m = re.fullmatch(r"(\d+)\s*(d|h|m)", t)
+    if not m:
+        raise ParseError("Give one wait for the next card, like 12h or 1d (or now).")
+    n = int(m[1]) * {"d": 1440, "h": 60, "m": 1}[m[2]]
+    if not 15 <= n <= REPOST_MAX:
+        raise ParseError("The next card can wait from 15 minutes to a week after the last gathering ends.")
+    return n
+
+
+def format_wait(minutes: int) -> str:
+    """"3 hours", "1 day", "2 days", "45 min"."""
+    if minutes % 1440 == 0:
+        return f"{minutes // 1440} day{'s' if minutes >= 2880 else ''}"
+    if minutes % 60 == 0:
+        return f"{minutes // 60} hour{'s' if minutes >= 120 else ''}"
+    return f"{minutes} min"
+
+
+def format_repost(minutes: int) -> str:
+    """"as soon as the last one starts", or "1 day after the last one ends"."""
+    if not minutes:
+        return "as soon as the last one starts"
+    return f"{format_wait(minutes)} after the last one ends"
+
+
+def repost_at(prev_starts: datetime, prev_minutes: int, wait: int, next_starts: datetime,
+              reminders: list[int], lobby: int) -> datetime | None:
+    """When the next card of a series goes up: the wait after the last one ends, but never later than its
+    first reminder or lobby thread (and at least an hour before it starts). None: straight away."""
+    if not wait:
+        return None
+    wanted = prev_starts + timedelta(minutes=prev_minutes + wait)
+    lead = max([REPOST_LEAD_MIN, lobby] + list(reminders))
+    return min(wanted, next_starts - timedelta(minutes=lead))
+
+
+def held_until(post_at: str | None, message_id: int | None, starts: datetime, reminders: list[int],
+               lobby: int) -> datetime | None:
+    """For a gathering whose card hasn't gone up yet: when it must go up (its own time, or sooner if it was
+    moved earlier, so it's up before its first reminder or lobby). None when it's already up."""
+    if message_id or not post_at:
+        return None
+    lead = max([REPOST_LEAD_MIN, lobby] + list(reminders))
+    return min(datetime.fromisoformat(post_at), starts - timedelta(minutes=lead))

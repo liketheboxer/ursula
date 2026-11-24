@@ -16,7 +16,7 @@ from .. import presence_logic as PL
 from ..discord_util import above_their_reach, self_serve_problem
 from ..timeutil import valid_timezone
 from ..region_logic import guess_zone
-from ..voyage_logic import LOBBY_CHOICES, format_lobby, zone_from_name
+from ..voyage_logic import LOBBY_CHOICES, REPOST_CHOICES, format_lobby, format_repost, format_wait, zone_from_name
 
 _ZONES = sorted(available_timezones())
 
@@ -75,6 +75,20 @@ class Admin(commands.GroupCog, group_name="pdc", group_description="Ursula's set
         return [app_commands.Choice(name=z, value=z) for z in matches]
 
     # ------------------------------------------------------------ gatherings
+    @gatherings.command(name="repeatwait", description="When a repeating gathering's next card goes up (each series can change it)")
+    @app_commands.describe(when="As soon as the last one starts, or a while after it ends")
+    @app_commands.choices(when=[app_commands.Choice(name="As soon as the last one starts", value=0)] + [
+        app_commands.Choice(name=f"{format_wait(m)} after the last one ends", value=m) for m in REPOST_CHOICES])
+    async def gatherings_repeatwait(self, interaction: discord.Interaction, when: app_commands.Choice[int]) -> None:
+        await self.bot.db.update_settings(interaction.guild_id, repost_minutes=when.value)
+        text = f"A repeating gathering's next card goes up {format_repost(when.value)}"
+        if when.value:
+            text += (" (its start plus its length), unless the series has its own wait. It always goes "
+                     "up in time for its first reminder or lobby thread, and at least an hour before it starts.")
+        else:
+            text += ", unless the series has its own wait."
+        await interaction.response.send_message(text, ephemeral=True)
+
     @gatherings.command(name="lobby", description="When the lobby thread opens before each gathering (each can change it)")
     @app_commands.describe(when="How long before the start; Off for no lobby threads")
     @app_commands.choices(when=[app_commands.Choice(name="Off", value=0)] + [

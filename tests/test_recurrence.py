@@ -163,12 +163,13 @@ async def test_daisho_changes_the_series(env):
     tz = await cog.tz(10)
     own = datetime.fromisoformat(v.starts_at).astimezone(tz).date()
     d = Daisho(bot)
-    msg = await d.apply_voyage_update(guild, {"id": v.id, "repeat": "nth:last", "repeat_until": "2027-09-01",
+    until = (own + timedelta(days=400)).isoformat()      # past a year away, so the screen's 12 dates all fit
+    msg = await d.apply_voyage_update(guild, {"id": v.id, "repeat": "nth:last", "repeat_until": until,
                                               "skip": [], "unskip": []})
     v = await bot.db.get_voyage(v.id)
-    assert "updated" in msg and v.repeat == nth_of(own, last=True) and v.repeat_until == "2027-09-01"
+    assert "updated" in msg and v.repeat == nth_of(own, last=True) and v.repeat_until == until
     snap = (await d.snap_voyages(guild))[0]
-    assert snap["repeat_label"].startswith("Every month on the last") and len(snap["series"]) == 10
+    assert snap["repeat_label"].startswith("Every month on the last") and len(snap["series"]) == 12
     assert snap["repeat_choices"][0] == ["Doesn't repeat", "none"] and snap["local_date"] == own.isoformat()
     first = snap["series"][0]["date"]
     await d.apply_voyage_update(guild, {"id": v.id, "skip": [first]})
@@ -252,3 +253,96 @@ def test_a_daylight_saving_gap_doesnt_shift_the_series():
     gap = to_utc(date(2027, 3, 14), time(2, 30), PT)          # 2:30 doesn't exist that night: it's 3:30
     nxt = next_occurrence(gap, "weekly", PT, at=time(2, 30))
     assert nxt.astimezone(PT).hour == 2 and nxt.astimezone(PT).minute == 30
+
+
+# ------------------------------------------------------------ 1.8.0: the next card waits a while after the last one
+def test_repost_rules():
+    from ursula.voyage_logic import format_repost, parse_repost, repost_at, repost_for
+    assert parse_repost(None) is None and parse_repost("default") is None and parse_repost("now") == 0
+    assert parse_repost("12h") == 720 and parse_repost("2d") == 2880
+    for bad in ("forever", "10m", "8d", "1h 2h"):
+        with pytest.raises(ParseError):
+            parse_repost(bad)
+    assert repost_for(None, 180) == 180 and repost_for(0, 180) == 0 and repost_for(60, 0) == 60
+    assert format_repost(0) == "as soon as the last one starts"
+    assert format_repost(1440) == "1 day after the last one ends"
+    prev = at8(date(2026, 10, 2))
+    nxt = at8(date(2026, 10, 9))
+    assert repost_at(prev, 120, 0, nxt, [1440, 60], 60) is None
+    # 2 hours long, then a day: Saturday at 10pm
+    assert repost_at(prev, 120, 1440, nxt, [1440, 60], 60) == prev + timedelta(hours=26)
+    # never after its first reminder (a 3-day wait would be past the 1-day reminder)
+    assert repost_at(prev, 120, 7 * 1440, nxt, [1440, 60], 60) == nxt - timedelta(days=1)
+    # and at least an hour ahead, even with no reminders or lobby
+    assert repost_at(prev, 120, 7 * 1440, nxt, [], 0) == nxt - timedelta(hours=1)
+
+
+async def test_the_next_card_waits_its_turn_then_goes_up(env):
+    from types import SimpleNamespace
+    bot, cog, guild, text = env
+    await bot.db.update_settings(10, repost_minutes=720)                 # 12 hours after the last one ends
+    await make_voyage(cog, guild, repeat="weekly", reminders="1h")
+    a = await only(bot)
+    await bot.db.update_voyage(a.id, status="started")
+    b = await cog.schedule_next(guild, a)
+    assert b.held and not b.message_id and not b.event_id
+    a_start = datetime.fromisoformat(a.starts_at)
+    assert datetime.fromisoformat(b.post_at) == a_start + timedelta(minutes=120 + 720)
+    # the sweep doesn't make a second one, and the clock leaves it alone until its time
+    await cog.sweep(guild, await bot.db.get_voyage(a.id))
+    assert len(await bot.db.voyages_with_status("scheduled")) == 1
+    await cog.tick(guild, b.id, datetime.fromisoformat(b.post_at) - timedelta(minutes=1))
+    assert (await bot.db.get_voyage(b.id)).held
+    await cog.tick(guild, b.id, datetime.fromisoformat(b.post_at))
+    b = await bot.db.get_voyage(b.id)
+    assert not b.held and b.message_id and b.event_id and b.post_at is None
+
+
+async def test_a_held_voyage_can_be_edited_and_its_wait_changed(env):
+    bot, cog, guild, text = env
+    await make_voyage(cog, guild, repeat="weekly", reminders="1h", repeat_wait=SimpleChoice("1d"))
+    a = await only(bot)
+    assert a.repost_minutes == 1440
+    await bot.db.update_voyage(a.id, status="started")
+    b = await cog.schedule_next(guild, a)
+    assert b.repost_minutes == 1440 and b.held
+    inter = organizer(guild)
+    await cog.edit.callback(cog, inter, voyage=str(b.id), repeat_wait=SimpleChoice("now"))
+    b = await bot.db.get_voyage(b.id)
+    assert b.repost_minutes == 0 and not b.held and b.message_id      # no wait any more: it goes up now
+    assert "Its card goes up" not in inter.followup.sent[-1] and "as soon as the last one starts" in inter.followup.sent[-1]
+
+
+async def test_cancelling_a_held_voyage_posts_the_one_after(env):
+    bot, cog, guild, text = env
+    await bot.db.update_settings(10, repost_minutes=1440)
+    await make_voyage(cog, guild, repeat="weekly", reminders="1h")
+    a = await only(bot)
+    await bot.db.update_voyage(a.id, status="started")
+    b = await cog.schedule_next(guild, a)
+    assert b.held
+    await cog.apply_cancel(guild, b.id)
+    (c,) = await bot.db.voyages_with_status("scheduled")
+    assert c.id != b.id and c.message_id and not c.held
+
+
+async def test_admin_and_daisho_set_the_wait(env):
+    from types import SimpleNamespace
+    from ursula.cogs.daisho import ApplyError, Daisho
+    bot, cog, guild, text = env
+    await make_voyage(cog, guild, repeat="weekly")
+    v = await only(bot)
+    d = Daisho(bot)
+    await d.apply_voyage_update(guild, {"id": v.id, "repost_minutes": 180})
+    assert (await bot.db.get_voyage(v.id)).repost_minutes == 180
+    with pytest.raises(ApplyError):
+        await d.apply_voyage_update(guild, {"id": v.id, "repost_minutes": 7})
+    snap = (await d.snap_voyages(guild))[0]
+    assert snap["repost"] == "3 hours after the last one ends" and snap["post_at"] is None
+    assert (await d.snap_settings(guild))["repost_minutes"] == 0
+
+
+class SimpleChoice:
+    def __init__(self, value):
+        self.value = value
+        self.name = value

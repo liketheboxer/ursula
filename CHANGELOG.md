@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.8.0 (2026-11-23): the next card waits its turn
+
+- **When a repeating gathering's next card goes up.** Until now the next gathering in a series was posted the moment the last one started. It can now wait until a while after the last one ends (its start plus its length): 1 hour to 3 days, or as before. `/pdc gatherings repeatwait` sets the server's; `repeat_wait` on `/gathering call` and `/gathering edit` (or the gathering's form on Daisho) gives a series its own, carried along the series. The waiting gathering is saved straight away, so `/gathering list`, `/gathering edit`, `/gathering cancel` and Daisho all see it (with when its card goes up), but its card, buttons and Discord Event only appear when its time comes. It always goes up in time for its first reminder or lobby thread, and at least an hour before it starts. Calling off or skipping a gathering still posts the next one straight away. The same as PlunderBot 1.9.0.
+- Tests: the Daisho series test no longer depends on today's date.
+
 ## 1.7.0 (2026-10-14): dispatches tag who they're for
 
 - A dispatch can name the Discord user it's for (`mention`, a bare user ID, from The Magical Samurai 1.27.0). Ursula puts their tag at the front of the post and lets only that one mention through; `@everyone`, roles and anyone else written in the title or text still can't ping.
